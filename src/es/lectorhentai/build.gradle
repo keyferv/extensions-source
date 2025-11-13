@@ -1,0 +1,10 @@
+ext {
+    extName = 'LectorHentai'
+    extClass = '.LectorHentai'
+    extVersionCode = 9
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"
+
+// Usamos la configuración por defecto de common.gradle (res/)
