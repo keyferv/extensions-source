@@ -8,11 +8,7 @@ import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.ConfigurableSource
-import eu.kanade.tachiyomi.source.model.Page
-import eu.kanade.tachiyomi.source.model.SChapter
 import okhttp3.OkHttpClient
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.text.SimpleDateFormat
@@ -33,29 +29,6 @@ class MHScans :
 
     override val useNewChapterEndpoint = true
     override val useLoadMoreRequest = LoadMoreStrategy.Always
-    override val mangaSubString = "series"
-
-    override fun chapterFromElement(element: Element): SChapter {
-        val chapter = super.chapterFromElement(element)
-
-        // Detectar si es premium
-        if (element.hasClass("premium") || element.selectFirst(".premium-icon") != null) {
-            chapter.name = "🔒 ${chapter.name}" // Indicador visual
-        }
-
-        return chapter
-    }
-
-    override fun pageListParse(document: Document): List<Page> {
-        // Detectar si el capítulo está bloqueado
-        val isLocked = document.selectFirst(".chapter-locked, .premium-required, .taels-required") != null
-
-        if (isLocked) {
-            throw Exception("⚠️ Capítulo premium - Requiere Taels. Desbloquéalo en el WebView.")
-        }
-
-        return super.pageListParse(document)
-    }
 
     private val defaultBaseUrl = "https://curiosidadtop.com/"
     private val preferences: SharedPreferences by lazy {
