@@ -1,0 +1,10 @@
+ext {
+    extName = 'MangaKomi'
+    extClass = '.MangaKomi'
+    themePkg = 'madara'
+    baseUrl = 'https://mangakomi.io'
+    overrideVersionCode = 5
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"

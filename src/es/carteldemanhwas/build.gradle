@@ -1,0 +1,10 @@
+ext {
+    extName = 'Cartel de Manhwas'
+    extClass = '.CarteldeManhwas'
+    themePkg = 'mangathemesia'
+    baseUrl = 'https://carteldemanhwas.com'
+    overrideVersionCode = 6
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"

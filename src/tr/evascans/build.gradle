@@ -1,0 +1,10 @@
+ext {
+    extName = 'ManWe'
+    extClass = '.EvaScans'
+    themePkg = 'madara'
+    baseUrl = 'https://manwe.pro'
+    overrideVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

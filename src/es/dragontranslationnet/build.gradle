@@ -1,0 +1,8 @@
+ext {
+    extName = 'DragonTranslation.net'
+    extClass = '.DragonTranslationNet'
+    extVersionCode = 40
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"

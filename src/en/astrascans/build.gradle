@@ -1,0 +1,10 @@
+ext {
+    extName = 'Astra Scans'
+    extClass = '.AstraScans'
+    themePkg = 'mangathemesia'
+    baseUrl = 'https://astrascans.org'
+    overrideVersionCode = 0
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

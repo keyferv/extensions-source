@@ -1,0 +1,10 @@
+ext {
+    extName = 'CAT-translator'
+    extClass = '.CatTranslator'
+    themePkg = 'madara'
+    baseUrl = 'https://cats-translator.com/manga'
+    overrideVersionCode = 2
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"

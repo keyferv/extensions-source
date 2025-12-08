@@ -1,0 +1,14 @@
+ext {
+    extName = 'Lunar Scans'
+    extClass = '.LunarScans'
+    themePkg = 'mangathemesia'
+    baseUrl = 'https://lunarscan.org'
+    overrideVersionCode = 3
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"
+
+dependencies {
+    implementation project(':lib:randomua')
+}
