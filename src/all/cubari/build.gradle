@@ -1,7 +1,7 @@
 ext {
     extName = 'Cubari'
     extClass = '.CubariFactory'
-    extVersionCode = 26
+    extVersionCode = 25
 }
 
 apply from: "$rootDir/common.gradle"

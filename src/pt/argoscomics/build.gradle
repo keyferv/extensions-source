@@ -3,7 +3,7 @@ ext {
     extClass = '.ArgosComics'
     themePkg = 'madara'
     baseUrl = 'https://argoscomic.com'
-    overrideVersionCode = 6
+    overrideVersionCode = 5
     isNsfw = false
 }
 

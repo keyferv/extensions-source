@@ -1,13 +1,14 @@
 ext {
     extName = 'Webtoons.com'
     extClass = '.WebtoonsFactory'
-    extVersionCode = 52
+    themePkg = 'webtoons'
+    baseUrl = 'https://www.webtoons.com'
+    overrideVersionCode = 40
     isNsfw = false
 }
 
 apply from: "$rootDir/common.gradle"
 
 dependencies {
-    implementation(project(':lib:cookieinterceptor'))
     implementation(project(':lib:textinterceptor'))
 }

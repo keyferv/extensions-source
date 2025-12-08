@@ -1,7 +1,9 @@
 ext {
     extName = 'West Manga'
     extClass = '.WestManga'
-    extVersionCode = 38
+    themePkg = 'mangathemesia'
+    baseUrl = 'https://westmanga.fun'
+    overrideVersionCode = 4
     isNsfw = true
 }
 

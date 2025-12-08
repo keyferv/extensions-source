@@ -13,12 +13,13 @@ android {
 
     namespace = "eu.kanade.tachiyomi.lib.${project.name}"
 
-    androidResources.enable = false
+    buildFeatures {
+        androidResources = false
+    }
 }
 
 dependencies {
     compileOnly(versionCatalogs.named("libs").findBundle("common").get())
-    implementation(project(":core"))
 }
 
 tasks.register("printDependentExtensions") {

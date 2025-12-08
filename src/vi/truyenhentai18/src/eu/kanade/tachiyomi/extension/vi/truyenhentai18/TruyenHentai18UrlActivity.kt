@@ -13,10 +13,10 @@ class TruyenHentai18UrlActivity : Activity() {
 
         val pathSegments = intent?.data?.pathSegments
 
-        if (pathSegments != null && pathSegments.size > 1) {
+        if (pathSegments != null && pathSegments.size > 0) {
             val intent = Intent().apply {
                 action = "eu.kanade.tachiyomi.SEARCH"
-                putExtra("query", "${TruyenHentai18.PREFIX_SLUG_SEARCH}${pathSegments[1]}")
+                putExtra("query", "${TruyenHentai18.PREFIX_SLUG_SEARCH}${pathSegments[0]}")
                 putExtra("filter", packageName)
             }
 

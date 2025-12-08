@@ -9,7 +9,7 @@ import java.util.TimeZone
 
 class Moodtoon : MangaThemesia(
     "Moodtoon",
-    "https://moon-toon.com",
+    "https://moodtoon.net",
     "th",
     dateFormat = SimpleDateFormat("MMMM d, yyyy", Locale("th")).apply {
         timeZone = TimeZone.getTimeZone("Asia/Bangkok")

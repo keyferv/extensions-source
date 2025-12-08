@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
 
 class KnightNoScanlation : Madara(
     "Knight No Scanlation",
-    "https://kns.rzword.xyz",
+    "https://kns.cookni.net",
     "es",
     SimpleDateFormat("MMMM dd, yyyy", Locale("es")),
 ) {

@@ -8,7 +8,6 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -37,7 +36,8 @@ class AComics : ParsedHttpSource() {
     override val supportsLatest = true
 
     // ============================== Popular ===============================
-    override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", Sort.POPULAR)
+    override fun popularMangaRequest(page: Int): Request =
+        GET("$baseUrl/comics?$DEFAULT_COMIC_QUERIES&sort=subscr_count&skip=${10 * (page - 1)}", headers)
 
     override fun popularMangaSelector() = "section.serial-card"
 
@@ -52,7 +52,8 @@ class AComics : ParsedHttpSource() {
     override fun popularMangaNextPageSelector() = "a.infinite-scroll"
 
     // =============================== Latest ===============================
-    override fun latestUpdatesRequest(page: Int): Request = searchMangaRequest(page, "", Sort.LATEST)
+    override fun latestUpdatesRequest(page: Int): Request =
+        GET("$baseUrl/comics?$DEFAULT_COMIC_QUERIES&sort=last_update&skip=${10 * (page - 1)}", headers)
 
     override fun latestUpdatesSelector() = popularMangaSelector()
 
@@ -61,107 +62,40 @@ class AComics : ParsedHttpSource() {
 
     // =============================== Search ===============================
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val urlBuilder = if (query.isNotEmpty()) {
-            "$baseUrl/search".toHttpUrl().newBuilder()
-                .addQueryParameter("keyword", query)
+        val url = if (query.isNotEmpty()) {
+            "$baseUrl/search?keyword=$query"
         } else {
-            val categories = mutableListOf<String>()
-            val ratings = mutableListOf<String>()
-            var comicType = "0"
-            var publication = "0"
-            var subscription = "0"
-            var minPages = "2"
-            var sort = "subscr_count"
-
+            val urlBuilder = "$baseUrl/comics?type=0&subscribe=0&issue_count=2&sort=subscr_count"
+                .toHttpUrl()
+                .newBuilder()
+                .addQueryParameter("skip", "${10 * (page - 1)}")
             for (filter in if (filters.isEmpty()) getFilterList() else filters) {
                 when (filter) {
-                    is Categories -> {
-                        val selected = filter
-                            .state
-                            .filter { it.state }
-                            .map { it.id }
-                            .sorted()
-                            .map { it.toString() }
-                        categories.addAll(selected)
+                    is GenreList -> {
+                        val categories = filter.state.filter { it.state }.joinToString(",") { it.id }
+                        urlBuilder.addQueryParameter("categories", categories)
                     }
-                    is Ratings -> {
-                        val selected = filter
-                            .state
-                            .filter { it.state }
-                            .map { it.id }
-                            .sorted()
-                            .map { it.toString() }
-                        ratings.addAll(selected)
-                    }
-
-                    // ---
-
-                    is ComicType -> {
-                        comicType = when (filter.state) {
-                            1 -> "orig"
-                            2 -> "trans"
-                            else -> comicType
-                        }
-                    }
-                    is Publication -> {
-                        publication = when (filter.state) {
+                    is Status -> {
+                        val status = when (filter.state) {
                             1 -> "no"
                             2 -> "yes"
-                            else -> publication
+                            else -> "0"
                         }
+                        urlBuilder.addQueryParameter("updatable", status)
                     }
-                    is Subscription -> {
-                        subscription = when (filter.state) {
-                            1 -> "yes"
-                            2 -> "no"
-                            else -> subscription
-                        }
-                    }
-                    is MinPages -> {
-                        minPages = filter.state
-                            .toIntOrNull()
-                            ?.toString()
-                            ?: minPages
-                    }
-                    is Sort -> {
-                        sort = when (filter.state) {
-                            0 -> "last_update"
-                            1 -> "subscr_count"
-                            2 -> "issue_count"
-                            3 -> "serial_name"
-                            else -> sort
+                    is RatingList -> {
+                        filter.state.forEach {
+                            if (it.state) {
+                                urlBuilder.addQueryParameter("ratings[]", it.id)
+                            }
                         }
                     }
                     else -> {}
                 }
             }
-
-            "$baseUrl/comics".toHttpUrl().newBuilder()
-                .addIndexedQueryParameters("categories", categories, page == 1)
-                .addIndexedQueryParameters("ratings", ratings, page == 1)
-                .addQueryParameter("type", comicType)
-                .addQueryParameter("updatable", publication)
-                .addQueryParameter("subscribe", subscription)
-                .addQueryParameter("issue_count", minPages)
-                .addQueryParameter("sort", sort)
+            urlBuilder.build().toString()
         }
-
-        if (page > 1) {
-            urlBuilder.addQueryParameter("skip", ((page - 1) * 10).toString())
-        }
-
-        return GET(urlBuilder.build(), headers)
-    }
-
-    fun HttpUrl.Builder.addIndexedQueryParameters(
-        name: String,
-        values: Iterable<String?>,
-        collapse: Boolean,
-    ): HttpUrl.Builder = apply {
-        values.forEachIndexed { i, value ->
-            val key = if (collapse) "$name[]" else "$name[$i]"
-            addQueryParameter(key, value)
-        }
+        return GET(url, headers)
     }
 
     override fun searchMangaSelector() = popularMangaSelector()
@@ -213,61 +147,46 @@ class AComics : ParsedHttpSource() {
     override fun imageUrlParse(document: Document) = throw UnsupportedOperationException()
 
     // ============================== Filters ===============================
-    private class Genre(name: String, val id: Int) : Filter.CheckBox(name)
-    private class Rating(name: String, val id: Int) : Filter.CheckBox(name, state = true)
+    private class Genre(name: String, val id: String) : Filter.CheckBox(name)
+    private class Rating(name: String, val id: String) : Filter.CheckBox(name, state = true)
+    private class Status : Filter.Select<String>("Статус", arrayOf("Все", "Завершенный", "Продолжающийся"))
 
-    private class Categories : Filter.Group<Genre>(
+    private class GenreList : Filter.Group<Genre>(
         "Категории",
         listOf(
-            Genre("Животные", 1),
-            Genre("Драма", 2),
-            Genre("Фентези", 3),
-            Genre("Игры", 4),
-            Genre("Юмор", 5),
-            Genre("Журнал", 6),
-            Genre("Паранормальное", 7),
-            Genre("Конец света", 8),
-            Genre("Романтика", 9),
-            Genre("Фантастика", 10),
-            Genre("Бытовое", 11),
-            Genre("Стимпанк", 12),
-            Genre("Супергерои", 13),
-            Genre("Детектив", 14),
-            Genre("Историческое", 15),
+            Genre("Животные", "1"),
+            Genre("Драма", "2"),
+            Genre("Фэнтези", "3"),
+            Genre("Игры", "4"),
+            Genre("Юмор", "5"),
+            Genre("Журнал", "6"),
+            Genre("Паранормальное", "7"),
+            Genre("Конец света", "8"),
+            Genre("Романтика", "9"),
+            Genre("Фантастика", "10"),
+            Genre("Бытовое", "11"),
+            Genre("Стимпанк", "12"),
+            Genre("Супергерои", "13"),
         ),
     )
 
-    private class Ratings : Filter.Group<Rating>(
+    private class RatingList : Filter.Group<Rating>(
         "Возрастная категория",
         listOf(
-            Rating("NR", 1),
-            Rating("G", 2),
-            Rating("PG", 3),
-            Rating("PG-13", 4),
-            Rating("R", 5),
-            Rating("NC-17", 6),
+            Rating("???", "1"),
+            Rating("0+", "2"),
+            Rating("6+", "3"),
+            Rating("12+", "4"),
+            Rating("16+", "5"),
+            Rating("18+", "6"),
         ),
     )
 
-    private class ComicType : Filter.Select<String>("Тип комикса", arrayOf("Все", "Оригинальный", "Перевод")) // "0", "orig", "trans"
-    private class Publication : Filter.Select<String>("Публикация", arrayOf("Все", "Завершенный", "Продолжающийся")) // "0", "no", "yes"
-    private class Subscription : Filter.Select<String>("Подписка", arrayOf("Все", "В моей ленте", "Кроме моей ленты")) // "0", "yes", "no"
-    private class MinPages : Filter.Text("Минимум страниц", state = "2")
-    private class Sort(state: Int = 1) : Filter.Select<String>("Сортировка", arrayOf("по дате обновления", "по количеству подписчиков", "по количеству выпусков", "по алфавиту"), state = state) { // "last_update", "subscr_count", "issue_count", "serial_name"
-        companion object {
-            val LATEST = FilterList(Ratings(), Sort(0))
-            val POPULAR = FilterList(Ratings(), Sort(1))
-        }
-    }
-
     override fun getFilterList() = FilterList(
-        Categories(),
-        Ratings(),
-        Filter.Separator(),
-        ComicType(),
-        Publication(),
-        Subscription(),
-        MinPages(),
-        Sort(),
+        Status(),
+        RatingList(),
+        GenreList(),
     )
 }
+
+private const val DEFAULT_COMIC_QUERIES = "categories=&ratings[]=1&ratings[]=2&ratings[]=3&ratings[]=4&ratings[]=5&ratings[]=6&type=0&updatable=0&issue_count=2"

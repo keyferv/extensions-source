@@ -10,7 +10,6 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
-import eu.kanade.tachiyomi.util.asJsoup
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -24,7 +23,6 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import rx.Observable
 import uy.kohesive.injekt.injectLazy
-import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -47,49 +45,47 @@ class MangaBuff : ParsedHttpSource() {
         val request = chain.request()
 
         if (request.method == "POST" && request.header("X-CSRF-TOKEN") == null) {
-            val token = getToken()
             val newRequest = request.newBuilder()
-                .header("X-Requested-With", "XMLHttpRequest")
-                .header("X-CSRF-TOKEN", token)
-                .build()
-
-            val response = chain.proceed(newRequest)
+            val token = getToken()
+            val response = chain.proceed(
+                newRequest
+                    .addHeader("X-CSRF-TOKEN", token)
+                    .build(),
+            )
 
             if (response.code == 419) {
                 response.close()
-                storedToken = null
-                val retryToken = getToken()
-                val retryRequest = request.newBuilder()
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .header("X-CSRF-TOKEN", retryToken)
-                    .build()
-                return chain.proceed(retryRequest)
+                storedToken = null // reset the token
+                val newToken = getToken()
+                return chain.proceed(
+                    newRequest
+                        .addHeader("X-CSRF-TOKEN", newToken)
+                        .build(),
+                )
             }
 
             return response
         }
 
-        return chain.proceed(request)
+        val response = chain.proceed(request)
+
+        if (response.header("Content-Type")?.contains("text/html") != true) {
+            return response
+        }
+
+        storedToken = Jsoup.parse(response.peekBody(Long.MAX_VALUE).string())
+            .selectFirst("head meta[name*=csrf-token]")
+            ?.attr("content")
+
+        return response
     }
 
     private fun getToken(): String {
-        storedToken?.let { return it }
-
-        val request = GET(baseUrl, headers)
-        val response = client.newCall(request).execute()
-
-        response.use {
-            val document = it.asJsoup()
-            val token = document.select("head meta[name*=csrf-token]")
-                .attr("content")
-
-            if (token.isEmpty()) {
-                throw IOException("Unable to find CSRF token")
-            }
-
-            storedToken = token
-            return token
+        if (storedToken.isNullOrEmpty()) {
+            val request = GET(baseUrl, headers)
+            client.newCall(request).execute().close() // updates token in interceptor
         }
+        return storedToken!!
     }
 
     // Popular

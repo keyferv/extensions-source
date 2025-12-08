@@ -461,17 +461,11 @@ class MangaDexHelper(lang: String) {
 
         // In future calculate [END] if non mvp api doesn't provide it
 
-        val unavailablePrefix = if (attr.isUnavailable == true) {
-            intl["chapter_unavailable_prefix"] + " - "
-        } else {
-            ""
-        }
-
         return SChapter.create().apply {
             url = "/chapter/${chapterDataDto.id}"
             name = chapterName.joinToString(" ").removeEntities()
             date_upload = parseDate(attr.publishAt)
-            scanlator = unavailablePrefix + groups
+            scanlator = groups
         }
     }
 

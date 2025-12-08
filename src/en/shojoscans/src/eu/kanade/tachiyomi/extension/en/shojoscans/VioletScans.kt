@@ -9,6 +9,4 @@ class VioletScans : MangaThemesia(
     mangaUrlDirectory = "/comics",
 ) {
     override val id = 9079184529211162476
-
-    override fun chapterListSelector(): String = "#chapterlist li:not(:has(svg))"
 }

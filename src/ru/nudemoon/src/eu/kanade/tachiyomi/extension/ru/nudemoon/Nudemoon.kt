@@ -170,39 +170,30 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
     }
 
     override fun chapterListSelector() = popularMangaSelector()
-    protected fun chapterListNextPageSelector() = popularMangaNextPageSelector()
 
     override fun chapterListParse(response: Response): List<SChapter> = mutableListOf<SChapter>().apply {
         val document = response.asJsoup()
 
         document.selectFirst("td.button a:contains(Все главы)")?.let { allPageElement ->
-            var page = 1
             var pageListDocument: Document
-            var pageListLink = allPageElement.absUrl("href")
-            do {
-                client.newCall(
-                    GET(pageListLink, headers),
-                ).execute().run {
-                    if (!isSuccessful) {
-                        close()
-                        throw Exception("HTTP error $code")
+            val pageListLink = allPageElement.attr("href")
+            client.newCall(
+                GET(baseUrl + pageListLink, headers),
+            ).execute().run {
+                if (!isSuccessful) {
+                    close()
+                    throw Exception("HTTP error $code")
+                }
+                pageListDocument = this.asJsoup()
+            }
+            if (pageListDocument.select(chapterListSelector()).isEmpty()) {
+                add(chapterFromSinglePage(document, response.request.url.toString()))
+            } else {
+                pageListDocument.select(chapterListSelector())
+                    .forEach {
+                        add(chapterFromElement(it))
                     }
-                    pageListDocument = this.asJsoup()
-                }
-                if (pageListDocument.select(chapterListSelector()).isEmpty() && page == 1) {
-                    add(chapterFromSinglePage(document, response.request.url.toString()))
-                    break
-                } else {
-                    pageListDocument.select(chapterListSelector())
-                        .forEach {
-                            add(chapterFromElement(it))
-                        }
-                }
-                pageListDocument.selectFirst(chapterListNextPageSelector())?.let { nextPageElement ->
-                    page++
-                    pageListLink = nextPageElement.absUrl("href")
-                }
-            } while (pageListDocument.selectFirst(chapterListNextPageSelector()) != null)
+            }
         } ?: run {
             add(chapterFromSinglePage(document, response.request.url.toString()))
         }
@@ -241,17 +232,17 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         return textDate.replace("Май", "Мая").let {
             try {
                 dateParseRu.parse(it)?.time ?: 0L
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 0L
             }
         }
     }
 
     override fun pageListParse(response: Response): List<Page> = mutableListOf<Page>().apply {
-        response.asJsoup().select("img.border").mapIndexed { index, img ->
+        response.asJsoup().select("div.gallery-item img").mapIndexed { index, img ->
             add(Page(index, imageUrl = img.attr("abs:data-src")))
         }
-        if (isEmpty() && cookieManager.getCookie(baseUrl).contains("fusion_user").not()) {
+        if (size == 0 && cookieManager.getCookie(baseUrl).contains("fusion_user").not()) {
             throw Exception("Страницы не найдены. Возможно необходима авторизация в WebView")
         }
     }
@@ -277,6 +268,7 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("анал"),
         Genre("без цензуры"),
         Genre("беременные"),
+        Genre("близняшки"),
         Genre("большие груди"),
         Genre("в бассейне"),
         Genre("в больнице"),
@@ -290,7 +282,6 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("горничные"),
         Genre("горячий источник"),
         Genre("групповой секс"),
-        Genre("гуро"),
         Genre("драма"),
         Genre("запредельное"),
         Genre("золотой дождь"),
@@ -299,14 +290,11 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("извращение"),
         Genre("измена"),
         Genre("имеют парня"),
-        Genre("инцест"),
         Genre("клизма"),
         Genre("колготки"),
-        Genre("комикс"),
-        Genre("копро"),
+        Genre("комиксы"),
+        Genre("комиксы 3D"),
         Genre("косплей"),
-        Genre("лоликон"),
-        Genre("манхва"),
         Genre("мастурбация"),
         Genre("мерзкий мужик"),
         Genre("много спермы"),
@@ -314,14 +302,10 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("монстры"),
         Genre("на камеру"),
         Genre("на природе"),
-        Genre("насекомые"),
-        Genre("недоперевод"),
-        Genre("нейросеть"),
         Genre("обычный секс"),
         Genre("огромный член"),
         Genre("пляж"),
         Genre("подглядывание"),
-        Genre("пояс верности"),
         Genre("принуждение"),
         Genre("продажность"),
         Genre("пьяные"),
@@ -329,7 +313,6 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("романтика"),
         Genre("с ушками"),
         Genre("секс игрушки"),
-        Genre("сетакон"),
         Genre("спящие"),
         Genre("страпон"),
         Genre("студенты"),
@@ -344,21 +327,17 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("фетиш"),
         Genre("фурри"),
         Genre("футанари"),
-        Genre("футджоб"),
+        Genre("футфетиш"),
         Genre("фэнтези"),
         Genre("цветная"),
         Genre("чикан"),
         Genre("чулки"),
         Genre("шимейл"),
         Genre("эксгибиционизм"),
-        Genre("эльфы"),
         Genre("юмор"),
-        Genre("юные"),
         Genre("юри"),
-        Genre("яой"),
-        Genre("3D арт"),
         Genre("ahegao"),
-        Genre("bdsm"),
+        Genre("BDSM"),
         Genre("ganguro"),
         Genre("gender bender"),
         Genre("megane"),
@@ -366,9 +345,7 @@ class Nudemoon : ParsedHttpSource(), ConfigurableSource {
         Genre("monstergirl"),
         Genre("netorare"),
         Genre("nipple penetration"),
-        Genre("skinsuit"),
         Genre("titsfuck"),
-        Genre("vore"),
         Genre("x-ray"),
     )
 

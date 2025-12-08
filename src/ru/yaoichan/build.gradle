@@ -3,7 +3,7 @@ ext {
     extClass = '.YaoiChan'
     themePkg = 'multichan'
     baseUrl = 'https://yaoi-chan.me'
-    overrideVersionCode = 5
+    overrideVersionCode = 4
     isNsfw = true
 }
 

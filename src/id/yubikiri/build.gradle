@@ -1,9 +1,9 @@
 ext {
-    extName = 'Kaguya'
-    extClass = '.Kaguya'
+    extName = 'Yubikiri'
+    extClass = '.Yubikiri'
     themePkg = 'madara'
-    baseUrl = 'https://kaguya.id'
-    overrideVersionCode = 1
+    baseUrl = 'https://yubikiri.my.id'
+    overrideVersionCode = 0
     isNsfw = false
 }
 

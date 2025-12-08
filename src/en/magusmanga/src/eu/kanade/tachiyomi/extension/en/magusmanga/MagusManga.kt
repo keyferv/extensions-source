@@ -1,33 +1,41 @@
 package eu.kanade.tachiyomi.extension.en.magusmanga
 
-import eu.kanade.tachiyomi.multisrc.iken.Iken
-import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.multisrc.keyoapp.Keyoapp
 import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
-import eu.kanade.tachiyomi.source.model.MangasPage
-import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.util.asJsoup
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.Response
+import okio.IOException
+import org.jsoup.Jsoup
 
-class MagusManga : Iken(
+class MagusManga : Keyoapp(
     "Magus Manga",
+    "https://magustoon.com",
     "en",
-    "https://magustoon.org",
-    "https://api.magustoon.org",
 ) {
-    // Moved from Keyoapp to Iken
-    override val versionId = 3
+    override val versionId = 2
 
     override val client = network.cloudflareClient.newBuilder()
+        .addInterceptor(::captchaInterceptor)
         .rateLimitHost(baseUrl.toHttpUrl(), 1)
         .build()
 
-    override fun popularMangaRequest(page: Int) = GET(baseUrl, headers)
+    private fun captchaInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val entries = response.asJsoup().select(".splide__track li > a").mapNotNull {
-            titleCache[it.absUrl("href").substringAfter("series/")]?.toSManga()
-        }.distinctBy(SManga::url)
-        return MangasPage(entries, false)
+        if (response.code == 401) {
+            val document = Jsoup.parse(
+                response.peekBody(Long.MAX_VALUE).string(),
+                response.request.url.toString(),
+            )
+
+            if (document.selectFirst(".g-recaptcha") != null) {
+                response.close()
+                throw IOException("Solve Captcha in WebView")
+            }
+        }
+
+        return response
     }
 }

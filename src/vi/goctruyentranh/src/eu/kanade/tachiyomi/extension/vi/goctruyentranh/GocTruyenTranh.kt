@@ -14,16 +14,16 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import keiyoushi.utils.getPreferences
-import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import uy.kohesive.injekt.injectLazy
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -44,8 +44,10 @@ class GocTruyenTranh : ParsedHttpSource(), ConfigurableSource {
 
     private val dateFormat = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.US)
 
+    private val json: Json by injectLazy()
+
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .rateLimit(3)
+        .rateLimit(1)
         .build()
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
@@ -58,13 +60,7 @@ class GocTruyenTranh : ParsedHttpSource(), ConfigurableSource {
             setUrlWithoutDomain(it!!.absUrl("href"))
             title = it.text()
         }
-        thumbnail_url = element.selectFirst("img")
-            ?.absUrl("src")
-            ?.let { url ->
-                url.toHttpUrlOrNull()
-                    ?.queryParameter("url")
-                    ?: url
-            }
+        thumbnail_url = element.selectFirst("img")?.absUrl("src")
     }
 
     override fun latestUpdatesNextPageSelector(): String = "nav ul li"
@@ -92,40 +88,29 @@ class GocTruyenTranh : ParsedHttpSource(), ConfigurableSource {
     private fun parseDate(date: String): Long = runCatching {
         val calendar = Calendar.getInstance()
         val number = date.replace(Regex("[^0-9]"), "").trim().toInt()
-        when (date.replace(Regex("[0-9]"), "").lowercase().trim()) {
-            "giây trước" -> calendar.apply { add(Calendar.SECOND, -number) }.timeInMillis
+        when (date.replace(Regex("[0-9]"), "").trim()) {
             "phút trước" -> calendar.apply { add(Calendar.MINUTE, -number) }.timeInMillis
             "giờ trước" -> calendar.apply { add(Calendar.HOUR, -number) }.timeInMillis
             "ngày trước" -> calendar.apply { add(Calendar.DAY_OF_YEAR, -number) }.timeInMillis
-            else -> dateFormat.tryParse(date)
+            else -> dateFormat.parse(date)?.time
         }
     }.getOrNull() ?: 0L
 
     override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException()
 
     override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        title = document.select("section aside:first-child h1").text()
+        title = document.selectFirst("section aside:first-child h1")!!.text()
         genre = document.select("span:contains(Thể loại:) ~ a").joinToString { it.text().trim(',', ' ') }
-        description = document.select("div.mt-3").joinToString {
-            it.select("a, strong").unwrap()
-            it.wholeText().trim()
-        }
-        thumbnail_url = document.selectFirst("section aside:first-child img")
-            ?.absUrl("src")
-            ?.let { url ->
-                url.toHttpUrlOrNull()
-                    ?.queryParameter("url")
-                    ?: url
-            }
+        description = document.selectFirst("div.mt-3")?.text()
+        thumbnail_url = document.selectFirst("section aside:first-child img")?.absUrl("src")
         status = parseStatus(document.selectFirst("span:contains(Trạng thái:) + b")?.text())
-        author = document.selectFirst("span:contains(Tác giả:) + b")?.text()
+        author = document.select("span:contains(Tác giả:) + b").joinToString { it.text() }
     }
 
     private fun parseStatus(status: String?) = when {
         status == null -> SManga.UNKNOWN
-        listOf("Đang Tiến Hành", "Đang Cập Nhật").any { status.contains(it, ignoreCase = true) } -> SManga.ONGOING
-        listOf("Hoàn Thành", "Đã Hoàn Thành").any { status.contains(it, ignoreCase = true) } -> SManga.COMPLETED
-        listOf("Tạm Ngưng", "Tạm Hoãn").any { status.contains(it, ignoreCase = true) } -> SManga.ON_HIATUS
+        status.contains("Đang tiến hành", ignoreCase = true) -> SManga.ONGOING
+        status.contains("Hoàn thành", ignoreCase = true) -> SManga.COMPLETED
         else -> SManga.UNKNOWN
     }
 
@@ -179,7 +164,7 @@ class GocTruyenTranh : ParsedHttpSource(), ConfigurableSource {
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val json = response.parseAs<SearchDTO>()
+        val json = json.decodeFromString<SearchDTO>(response.body.string())
         val manga = json.comics.data.map {
             SManga.create().apply {
                 title = it.name
@@ -256,16 +241,16 @@ class GocTruyenTranh : ParsedHttpSource(), ConfigurableSource {
         Genre("Adventure", "2"),
         Genre("Fantasy", "3"),
         Genre("Manhua", "4"),
-        Genre("Chuyển Sinh", "5"),
-        Genre("Truyện Màu", "6"),
-        Genre("Xuyên Không", "7"),
+        Genre("Chuyển", "5"),
+        Genre("Truyện", "6"),
+        Genre("Xuyên", "7"),
         Genre("Manhwa", "8"),
         Genre("Drama", "9"),
         Genre("Historical", "10"),
         Genre("Manga", "11"),
         Genre("Seinen", "12"),
         Genre("Comedy", "13"),
-        Genre("Martial Arts", "14"),
+        Genre("Martial", "14"),
         Genre("Mystery", "15"),
         Genre("Romance", "16"),
         Genre("Shounen", "17"),
@@ -275,54 +260,53 @@ class GocTruyenTranh : ParsedHttpSource(), ConfigurableSource {
         Genre("Webtoon", "21"),
         Genre("School", "22"),
         Genre("Psychological", "23"),
-        Genre("Cổ Đại", "24"),
+        Genre("Cổ", "24"),
         Genre("Ecchi", "25"),
-        Genre("Gender Bender", "26"),
+        Genre("Gender", "26"),
         Genre("Shoujo", "27"),
-        Genre("Slice of Life", "28"),
-        Genre("Ngôn Tình", "29"),
+        Genre("Slice", "28"),
+        Genre("Ngôn", "29"),
         Genre("Horror", "30"),
-        Genre("Sci-fi", "31"),
+        Genre("Sci", "31"),
         Genre("Tragedy", "32"),
         Genre("Mecha", "33"),
         Genre("Comic", "34"),
-        Genre("One shot", "35"),
-        Genre("Shoujo Ai", "36"),
+        Genre("One", "35"),
+        Genre("Shoujo", "36"),
         Genre("Anime", "37"),
         Genre("Josei", "38"),
         Genre("Smut", "39"),
-        Genre("Shounen Ai", "40"),
+        Genre("Shounen", "40"),
         Genre("Mature", "41"),
-        Genre("Soft Yuri", "42"),
+        Genre("Soft", "42"),
         Genre("Adult", "43"),
         Genre("Doujinshi", "44"),
-        Genre("Live action", "45"),
-        Genre("Trinh Thám", "46"),
-        Genre("Việt Nam", "47"),
-        Genre("Truyện Scan", "48"),
+        Genre("Live", "45"),
+        Genre("Trinh", "46"),
+        Genre("Việt", "47"),
+        Genre("Truyện", "48"),
         Genre("Cooking", "49"),
-        Genre("Tạp chí truyện tranh", "50"),
-        Genre("16+", "51"),
-        Genre("Thiếu Nhi", "52"),
-        Genre("Soft Yaoi", "53"),
-        Genre("Đam Mỹ", "54"),
+        Genre("Tạp", "50"),
+        Genre("16", "51"),
+        Genre("Thiếu", "52"),
+        Genre("Soft", "53"),
+        Genre("Đam", "54"),
         Genre("BoyLove", "55"),
         Genre("Yaoi", "56"),
-        Genre("18+", "57"),
-        Genre("Người Thú", "58"),
+        Genre("18", "57"),
+        Genre("Người", "58"),
         Genre("ABO", "59"),
         Genre("Mafia", "60"),
         Genre("Isekai", "61"),
-        Genre("Hệ Thống", "62"),
+        Genre("Hệ", "62"),
         Genre("NTR", "63"),
         Genre("Yuri", "64"),
-        Genre("Girl Love", "65"),
+        Genre("Girl", "65"),
         Genre("Demons", "66"),
-        Genre("Huyền Huyễn", "67"),
+        Genre("Huyền", "67"),
         Genre("Detective", "68"),
-        Genre("Trọng Sinh", "69"),
+        Genre("Trọng", "69"),
         Genre("Magic", "70"),
-        Genre("Military", "71"),
     )
 
     private val preferences: SharedPreferences = getPreferences()

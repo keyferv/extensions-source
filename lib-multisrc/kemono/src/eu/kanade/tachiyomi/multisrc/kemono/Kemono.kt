@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.multisrc.kemono
 
-import android.app.Application
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
@@ -16,19 +15,14 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.utils.getPreferences
-import keiyoushi.utils.parseAs
-import okhttp3.Cache
-import okhttp3.CacheControl
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromStream
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.brotli.BrotliInterceptor
 import rx.Observable
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
-import java.io.File
+import uy.kohesive.injekt.injectLazy
 import java.lang.Thread.sleep
 import java.util.TimeZone
-import java.util.concurrent.TimeUnit
 import kotlin.math.min
 
 open class Kemono(
@@ -38,42 +32,20 @@ open class Kemono(
 ) : HttpSource(), ConfigurableSource {
     override val supportsLatest = true
 
-    override val client = network.cloudflareClient.newBuilder()
-        .rateLimit(1)
-        .addInterceptor { chain ->
-            val request = chain.request()
-            if (request.url.pathSegments.first() == "api") {
-                chain.proceed(request.newBuilder().header("Accept", "text/css").build())
-            } else {
-                chain.proceed(request)
-            }
-        }
-        .apply {
-            val index = networkInterceptors().indexOfFirst { it is BrotliInterceptor }
-            if (index >= 0) interceptors().add(networkInterceptors().removeAt(index))
-        }
-        .cache(
-            Cache(
-                directory = File(Injekt.get<Application>().externalCacheDir, "network_cache_${name.lowercase()}"),
-                maxSize = 50L * 1024 * 1024, // 50 MiB
-            ),
-        )
-        .build()
-
-    private val creatorsClient = client.newBuilder()
-        .readTimeout(5, TimeUnit.MINUTES)
-        .build()
+    override val client = network.cloudflareClient.newBuilder().rateLimit(1).build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
+
+    private val json: Json by injectLazy()
 
     private val preferences = getPreferences()
 
     private val apiPath = "api/v1"
 
-    private val dataPath = "data"
-
     private val imgCdnUrl = baseUrl.replace("//", "//img.")
+
+    private var mangasCache: List<KemonoCreatorDto> = emptyList()
 
     private fun String.formatAvatarUrl(): String = removePrefix("https://").replaceBefore('/', imgCdnUrl)
 
@@ -111,7 +83,6 @@ open class Kemono(
                 is SortFilter -> {
                     sort = filter.getValue() to if (filter.state!!.ascending) "asc" else "desc"
                 }
-
                 is TypeFilter -> {
                     filter.state.filter { state -> state.isIncluded() }.forEach { tri ->
                         typeIncluded.add(tri.value)
@@ -121,60 +92,44 @@ open class Kemono(
                         typeExcluded.add(tri.value)
                     }
                 }
-
-                is FavoritesFilter -> {
+                is FavouritesFilter -> {
                     fav = when (filter.state[0].state) {
                         0 -> null
                         1 -> true
                         else -> false
                     }
                 }
-
                 else -> {}
             }
         }
 
-        val mangas = run {
-            val favorites = if (fav != null) {
-                val response = client.newCall(GET("$baseUrl/$apiPath/account/favorites", headers)).execute()
+        var mangas = mangasCache
+        if (page == 1 || mangasCache.isEmpty()) {
+            var favourites: List<KemonoFavouritesDto> = emptyList()
+            if (fav != null) {
+                val favores = client.newCall(GET("$baseUrl/$apiPath/account/favorites", headers)).execute()
 
-                if (response.isSuccessful) {
-                    response.parseAs<List<KemonoFavoritesDto>>().filterNot { it.service.lowercase() == "discord" }
-                } else {
-                    response.close()
-                    val message = if (response.code == 401) "You are not logged in" else "HTTP error ${response.code}"
-                    throw Exception("Failed to fetch favorites: $message")
-                }
-            } else {
-                emptyList()
+                if (favores.code == 401) throw Exception("You are not Logged In")
+                favourites = favores.parseAs<List<KemonoFavouritesDto>>().filterNot { it.service.lowercase() == "discord" }
             }
 
-            val request = GET(
-                "$baseUrl/$apiPath/creators",
-                headers,
-                CacheControl.Builder().maxStale(30, TimeUnit.MINUTES).build(),
-            )
-            val response = creatorsClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                response.close()
-                throw Exception("HTTP error ${response.code}")
-            }
+            val response = client.newCall(GET("$baseUrl/$apiPath/creators", headers)).execute()
             val allCreators = response.parseAs<List<KemonoCreatorDto>>().filterNot { it.service.lowercase() == "discord" }
-            allCreators.filter {
+            mangas = allCreators.filter {
                 val includeType = typeIncluded.isEmpty() || typeIncluded.contains(it.service.serviceName().lowercase())
                 val excludeType = typeExcluded.isNotEmpty() && typeExcluded.contains(it.service.serviceName().lowercase())
 
                 val regularSearch = it.name.contains(title, true)
 
-                val isFavorited = when (fav) {
-                    true -> favorites.any { f -> f.id == it.id.also { _ -> it.fav = f.faved_seq } }
-                    false -> favorites.none { f -> f.id == it.id }
+                val isFavourited = when (fav) {
+                    true -> favourites.any { f -> f.id == it.id.also { _ -> it.fav = f.faved_seq } }
+                    false -> favourites.none { f -> f.id == it.id }
                     else -> true
                 }
 
-                includeType && !excludeType && isFavorited &&
+                includeType && !excludeType && isFavourited &&
                     regularSearch
-            }
+            }.also { mangasCache = it }
         }
 
         val sorted = when (sort.first) {
@@ -185,7 +140,6 @@ open class Kemono(
                     mangas.sortedBy { it.favorited }
                 }
             }
-
             "tit" -> {
                 if (sort.second == "desc") {
                     mangas.sortedByDescending { it.name }
@@ -193,7 +147,6 @@ open class Kemono(
                     mangas.sortedBy { it.name }
                 }
             }
-
             "new" -> {
                 if (sort.second == "desc") {
                     mangas.sortedByDescending { it.id }
@@ -201,16 +154,14 @@ open class Kemono(
                     mangas.sortedBy { it.id }
                 }
             }
-
             "fav" -> {
-                if (fav != true) throw Exception("Please check 'Favorites Only' Filter")
+                if (fav != true) throw Exception("Please check 'Favourites Only' Filter")
                 if (sort.second == "desc") {
                     mangas.sortedByDescending { it.fav }
                 } else {
                     mangas.sortedBy { it.fav }
                 }
             }
-
             else -> {
                 if (sort.second == "desc") {
                     mangas.sortedByDescending { it.updatedDate }
@@ -250,7 +201,7 @@ open class Kemono(
         var hasNextPage = true
         val result = ArrayList<SChapter>()
         while (offset < prefMaxPost && hasNextPage) {
-            val request = GET("$baseUrl/$apiPath${manga.url}/posts?o=$offset", headers)
+            val request = GET("$baseUrl/$apiPath${manga.url}?o=$offset", headers)
             val page: List<KemonoPostDto> = retry(request).parseAs()
             page.forEach { post -> if (post.images.isNotEmpty()) result.add(post.toSChapter()) }
             offset += PAGE_POST_LIMIT
@@ -280,7 +231,7 @@ open class Kemono(
 
     override fun pageListParse(response: Response): List<Page> {
         val postData: KemonoPostDtoWrapped = response.parseAs()
-        return postData.post.images.mapIndexed { i, path -> Page(i, imageUrl = "$baseUrl/$dataPath$path") }
+        return postData.post.images.mapIndexed { i, path -> Page(i, imageUrl = baseUrl + path) }
     }
 
     override fun imageRequest(page: Page): Request {
@@ -291,13 +242,17 @@ open class Kemono(
         val index = imageUrl.indexOf('/', 8)
         val url = buildString {
             append(imageUrl, 0, index)
-            append("/thumbnail")
+            append("/thumbnail/data")
             append(imageUrl.substring(index))
         }
         return GET(url, headers)
     }
 
     override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
+
+    private inline fun <reified T> Response.parseAs(): T = use {
+        json.decodeFromStream(it.body.byteStream())
+    }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
@@ -327,7 +282,7 @@ open class Kemono(
                 getSortsList,
             ),
             TypeFilter("Types", getTypes),
-            FavoritesFilter(),
+            FavouritesFilter(),
         )
 
     open val getTypes: List<String> = emptyList()
@@ -338,7 +293,7 @@ open class Kemono(
         Pair("Date Updated", "lat"),
         Pair("Alphabetical Order", "tit"),
         Pair("Service", "serv"),
-        Pair("Date Favorited", "fav"),
+        Pair("Date Favourited", "fav"),
     )
 
     internal open class TypeFilter(name: String, vals: List<String>) :
@@ -347,19 +302,17 @@ open class Kemono(
             vals.map { TriFilter(it, it.lowercase()) },
         )
 
-    internal class FavoritesFilter() :
+    internal class FavouritesFilter() :
         Filter.Group<TriFilter>(
-            "Favorites",
-            listOf(TriFilter("Favorites Only", "fav")),
+            "Favourites",
+            listOf(TriFilter("Favourites Only", "fav")),
         )
-
     internal open class TriFilter(name: String, val value: String) : Filter.TriState(name)
 
     internal open class SortFilter(name: String, selection: Selection, private val vals: List<Pair<String, String>>) :
         Filter.Sort(name, vals.map { it.first }.toTypedArray(), selection) {
         fun getValue() = vals[state!!.index].second
     }
-
     companion object {
         private const val PAGE_POST_LIMIT = 50
         private const val PAGE_CREATORS_LIMIT = 50

@@ -12,7 +12,6 @@ class KurageBunch : GigaViewer(
     "https://kuragebunch.com",
     "ja",
     "https://cdn-img.kuragebunch.com",
-    isPaginated = true,
 ) {
 
     override val supportsLatest: Boolean = false

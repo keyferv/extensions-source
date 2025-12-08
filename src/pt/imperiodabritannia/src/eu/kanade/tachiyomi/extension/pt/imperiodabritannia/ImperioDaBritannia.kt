@@ -15,14 +15,12 @@ class ImperioDaBritannia : Madara(
 ) {
 
     override val client: OkHttpClient = super.client.newBuilder()
-        .rateLimit(2, 1, TimeUnit.SECONDS)
-        .connectTimeout(1, TimeUnit.MINUTES)
-        .readTimeout(1, TimeUnit.MINUTES)
+        .rateLimit(1, 2, TimeUnit.SECONDS)
         .build()
 
     override val useNewChapterEndpoint = true
 
-    override val useLoadMoreRequest = LoadMoreStrategy.Always
+    override val useLoadMoreRequest = LoadMoreStrategy.Never
 
     override val mangaDetailsSelectorTag = ""
 

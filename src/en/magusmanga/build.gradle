@@ -1,9 +1,9 @@
 ext {
     extName = 'Magus Manga'
     extClass = '.MagusManga'
-    themePkg = 'iken'
-    baseUrl = 'https://magustoon.org'
-    overrideVersionCode = 44
+    themePkg = 'keyoapp'
+    baseUrl = 'https://magustoon.com'
+    overrideVersionCode = 35
     isNsfw = false
 }
 

@@ -1,9 +1,9 @@
 ext {
     extName = 'Seita Celestial'
     extClass = '.SeitaCelestial'
-    themePkg = 'madara'
+    themePkg = 'mangathemesia'
     baseUrl = 'https://seitacelestial.com'
-    overrideVersionCode = 5
+    overrideVersionCode = 18
     isNsfw = false
 }
 

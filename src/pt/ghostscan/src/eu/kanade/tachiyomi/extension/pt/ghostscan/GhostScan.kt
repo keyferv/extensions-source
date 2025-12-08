@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 
 class GhostScan : Madara(
     "Ghost Scan",
-    "https://ghostscan.xyz",
+    "https://ghostscan.com.br",
     "pt-BR",
     SimpleDateFormat("dd 'de' MMMMM 'de' yyyy", Locale("pt", "BR")),
 ) {

@@ -35,7 +35,6 @@ class MangaInfoDto(
 class ChapterInfoDto(
     val number: JsonPrimitive,
     val createdAt: String?,
-    val price: Int = 0,
 )
 
 @Serializable

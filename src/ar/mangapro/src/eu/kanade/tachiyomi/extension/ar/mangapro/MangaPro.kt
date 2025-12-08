@@ -5,8 +5,7 @@ import eu.kanade.tachiyomi.multisrc.iken.Iken
 class MangaPro : Iken(
     "Manga Pro",
     "ar",
-    "https://promanga.net",
-    "https://api.promanga.net",
+    "https://promanga.pro",
 ) {
     override val versionId = 4
 }

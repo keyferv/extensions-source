@@ -1,7 +1,9 @@
 ext {
     extName = 'Magazine Pocket'
     extClass = '.MagazinePocket'
-    extVersionCode = 9
+    themePkg = 'gigaviewer'
+    baseUrl = 'https://pocket.shonenmagazine.com'
+    overrideVersionCode = 0
     isNsfw = false
 }
 

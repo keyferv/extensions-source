@@ -19,7 +19,7 @@ import java.util.TimeZone
 
 class CoManhua : WPComics(
     "CoManhua",
-    "https://comanhuavui.com",
+    "https://comanhuaa.com",
     "vi",
     gmtOffset = null,
 ) {

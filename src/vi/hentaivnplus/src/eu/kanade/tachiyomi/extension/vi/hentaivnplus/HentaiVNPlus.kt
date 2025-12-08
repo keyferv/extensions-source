@@ -12,9 +12,9 @@ import java.util.Locale
 class HentaiVNPlus :
     Madara(
         "HentaiVN.plus",
-        "https://hentaivn.party",
+        "https://hentaivn.art",
         "vi",
-        dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ROOT),
+        dateFormat = SimpleDateFormat("MM/dd/yyyy", Locale.ROOT),
     ),
     ConfigurableSource {
     override val useLoadMoreRequest = LoadMoreStrategy.Never

@@ -11,21 +11,21 @@ import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
-import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import keiyoushi.utils.getPreferences
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import uy.kohesive.injekt.injectLazy
 
-class Webcomics : HttpSource(), ConfigurableSource {
+class Webcomics : ParsedHttpSource(), ConfigurableSource {
 
     override val name = "Webcomics"
 
@@ -54,33 +54,26 @@ class Webcomics : HttpSource(), ConfigurableSource {
 
     // ========================== Popular =====================================
 
-    override fun popularMangaRequest(page: Int) =
-        GET("$baseUrl/genres/All/All/Popularity/$page", headers)
+    override fun popularMangaRequest(page: Int) = GET("$baseUrl/genres/All/All/Popularity/$page", headers)
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override fun popularMangaSelector() = ".book-list .list-item a"
 
-        val mangas = document.select("#All a").map { element ->
-            SManga.create().apply {
-                title = element.selectFirst("h5")!!.text()
-                thumbnail_url = element.selectFirst("img[src]")?.absUrl("src")
-                setUrlWithoutDomain(element.absUrl("href"))
-            }
-        }
+    override fun popularMangaNextPageSelector() = ".page-list li:not([style*=none]) a.next"
 
-        val hasNextPage = document.selectFirst("script:containsData(__NUXT__)")?.data()
-            ?.substringAfter("page:")
-            ?.substringBefore(",")
-            ?.let { it.toIntOrNull() != null } ?: false
-
-        return MangasPage(mangas, hasNextPage)
+    override fun popularMangaFromElement(element: Element) = SManga.create().apply {
+        title = element.selectFirst("h2")!!.text()
+        thumbnail_url = element.selectFirst("img")?.absUrl("src")
+        setUrlWithoutDomain(element.absUrl("href"))
     }
 
     // ========================== Latest =====================================
-    override fun latestUpdatesRequest(page: Int) =
-        GET("$baseUrl/genres/All/All/Latest_Updated/$page", headers)
+    override fun latestUpdatesRequest(page: Int) = GET("$baseUrl/genres/All/All/Latest_Updated/$page", headers)
 
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
+    override fun latestUpdatesSelector() = popularMangaSelector()
+
+    override fun latestUpdatesFromElement(element: Element) = popularMangaFromElement(element)
+
+    override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
 
     // ========================== Search =====================================
 
@@ -97,46 +90,34 @@ class Webcomics : HttpSource(), ConfigurableSource {
                     val url = "$baseUrl/genres/$genre/All/Popular/$page"
                     return GET(url, headers)
                 }
-
                 else -> {}
             }
         }
         return popularMangaRequest(page)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override fun searchMangaSelector() = popularMangaSelector()
 
-        val mangas = document.select(".container .van-list div a").map { element ->
-            SManga.create().apply {
-                title = element.selectFirst("h5.info_name")!!.text()
-                thumbnail_url = element.selectFirst("img[src]")?.absUrl("src")
-                setUrlWithoutDomain(element.absUrl("href"))
-            }
-        }
+    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
 
-        return MangasPage(mangas, false)
-    }
+    override fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
 
     // ========================== Details ====================================
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-
+    override fun mangaDetailsParse(document: Document) = SManga.create().apply {
         val infoElement = document.selectFirst(".card-info")!!
-
-        return SManga.create().apply {
-            title = infoElement.selectFirst("h5")!!.text()
-            description = infoElement.selectFirst(".book-detail > p")?.text()
-            genre = infoElement.select(".label-tag").joinToString { it.text() }
-            thumbnail_url = infoElement.selectFirst("img")?.absUrl("src")
-            document.selectFirst(".chapter-updateDetail")?.text()?.let {
-                status = if (it.contains("IDK")) SManga.COMPLETED else SManga.ONGOING
-            }
+        title = infoElement.selectFirst("h5")!!.text()
+        description = infoElement.selectFirst(".book-detail > p")?.text()
+        genre = infoElement.select(".label-tag").joinToString { it.text() }
+        thumbnail_url = infoElement.selectFirst("img")?.absUrl("src")
+        document.selectFirst(".chapter-updateDetail")?.text()?.let {
+            status = if (it.contains("IDK")) SManga.COMPLETED else SManga.ONGOING
         }
     }
 
     // ========================== Chapter ====================================
+
+    override fun chapterListSelector() = throw UnsupportedOperationException()
 
     override fun chapterListRequest(manga: SManga): Request {
         val mangaId = manga.url.substringAfterLast("/")
@@ -164,21 +145,28 @@ class Webcomics : HttpSource(), ConfigurableSource {
         }.sortedBy(SChapter::chapter_number).reversed()
     }
 
+    override fun chapterFromElement(element: Element): SChapter {
+        val urlElement = element.select("a")
+
+        val chapter = SChapter.create()
+        chapter.setUrlWithoutDomain(urlElement.attr("href"))
+        chapter.name = urlElement.text().trim()
+        return chapter
+    }
+
     // ========================== Pages ====================================
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-
-        val script = document.select("script:containsData(__NUXT__)")
+    override fun pageListParse(document: Document): List<Page> {
+        val script = document.select("script")
             .firstOrNull { PAGE_REGEX.containsMatchIn(it.data()) }
             ?: throw Exception("You may need to log in")
 
         return PAGE_REGEX.findAll(script.data()).mapIndexed { index, match ->
-            Page(index, imageUrl = match.groups[0]!!.value.unicode())
+            Page(index, imageUrl = match.groups[1]!!.value.unicode())
         }.toList()
     }
 
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
+    override fun imageUrlParse(document: Document) = ""
 
     // ========================== Filters ==================================
 

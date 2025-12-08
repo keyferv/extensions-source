@@ -41,11 +41,7 @@ class MangaPoisk : ParsedHttpSource() {
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = if (query.isNotBlank()) {
-            "$baseUrl/search".toHttpUrl().newBuilder()
-                .addQueryParameter("q", query)
-                .addQueryParameter("page", page.toString())
-                .build()
-                .toString()
+            "$baseUrl/search?q=$query&page=$page"
         } else {
             val url = "$baseUrl/manga?page=$page".toHttpUrl().newBuilder()
             (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->

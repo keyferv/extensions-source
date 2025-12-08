@@ -27,15 +27,8 @@ class Images(
 
 @Serializable
 class Image(
-    private val t: String,
-) {
-    val extension get() = when (t) {
-        "w" -> "webp"
-        "p" -> "png"
-        "g" -> "gif"
-        else -> "jpg"
-    }
-}
+    val t: String,
+)
 
 @Serializable
 class Tag(

@@ -15,7 +15,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
@@ -97,7 +96,7 @@ class Doujins : HttpSource() {
         return "$baseUrl/folders?start=$startDateSec&end=$endDateSec"
     }
 
-    override fun latestUpdatesRequest(page: Int) = GET(getLatestPageUrl(page), headers)
+    override fun latestUpdatesRequest(page: Int) = GET(getLatestPageUrl(page))
 
     override fun mangaDetailsParse(response: Response): SManga {
         val document = response.asJsoup()
@@ -119,7 +118,7 @@ class Doujins : HttpSource() {
 
     override fun popularMangaParse(response: Response) = parseGalleryPage(response.asJsoup())
 
-    override fun popularMangaRequest(page: Int) = GET("$baseUrl/top/month", headers)
+    override fun popularMangaRequest(page: Int) = GET("$baseUrl/top/month")
 
     override fun searchMangaParse(response: Response) = parseGalleryPage(response.asJsoup())
 
@@ -131,21 +130,13 @@ class Doujins : HttpSource() {
 
         return when {
             query != "" -> {
-                val url = "$baseUrl/searches".toHttpUrl().newBuilder()
-                    .addQueryParameter("words", query)
-                    .addQueryParameter("page", page.toString())
-                    .addQueryParameter("sort", sortFilter.toUriPart())
-                    .build()
-                GET(url, headers)
+                GET("$baseUrl/searches?words=$query&page=$page&sort=${sortFilter.toUriPart()}")
             }
             seriesFilter.toUriPart() != "" -> {
-                val url = "$baseUrl${seriesFilter.toUriPart()}".toHttpUrl().newBuilder()
-                    .addQueryParameter("sort", sortFilter.toUriPart())
-                    .build()
-                GET(url, headers)
+                GET("$baseUrl${seriesFilter.toUriPart()}?sort=${sortFilter.toUriPart()}")
             }
             else -> {
-                GET("$baseUrl${popularityPeriodFilter.toUriPart()}", headers)
+                GET("$baseUrl${popularityPeriodFilter.toUriPart()}")
             }
         }
     }

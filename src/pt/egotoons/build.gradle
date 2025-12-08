@@ -1,9 +1,9 @@
 ext {
     extName = 'Ego Toons'
     extClass = '.EgoToons'
-    themePkg = 'zerotheme'
+    themePkg = 'yuyu'
     baseUrl = 'https://egotoons.com'
-    overrideVersionCode = 2
+    overrideVersionCode = 0
     isNsfw = true
 }
 

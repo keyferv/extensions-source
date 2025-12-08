@@ -41,7 +41,7 @@ class SpyFakku : HttpSource() {
 
     override val lang = "en"
 
-    override val supportsLatest = true
+    override val supportsLatest = false
 
     private val json: Json by injectLazy()
 
@@ -59,10 +59,6 @@ class SpyFakku : HttpSource() {
         return GET("$baseApiUrl/library?sort=released_at&page=$page", headers)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$baseApiUrl/library?sort=created_at&page=$page", headers)
-    }
-
     override fun popularMangaParse(response: Response): MangasPage {
         val library = response.parseAs<HentaiLib>()
 
@@ -72,8 +68,6 @@ class SpyFakku : HttpSource() {
 
         return MangasPage(mangas, hasNextPage)
     }
-
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
 
     override fun searchMangaParse(response: Response) = popularMangaParse(response)
 
@@ -362,4 +356,6 @@ class SpyFakku : HttpSource() {
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
+    override fun latestUpdatesParse(response: Response) = throw UnsupportedOperationException()
 }

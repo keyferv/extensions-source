@@ -78,12 +78,7 @@ class Kiutaku : ParsedHttpSource() {
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = baseUrl.toHttpUrl().newBuilder()
-            .addQueryParameter("search", query)
-            .addQueryParameter("start", getPage(page).toString())
-            .build()
-
-        return GET(url, headers)
+        return GET("$baseUrl/?search=$query&start=${getPage(page)}", headers)
     }
 
     override fun searchMangaSelector() = popularMangaSelector()

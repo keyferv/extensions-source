@@ -10,7 +10,6 @@ class SundayWebEvery : GigaViewer(
     "https://www.sunday-webry.com",
     "ja",
     "https://cdn-img.www.sunday-webry.com/public/page",
-    isPaginated = true,
 ) {
 
     override val client: OkHttpClient = super.client.newBuilder()

@@ -10,7 +10,6 @@ class ComicDays : GigaViewer(
     "https://comic-days.com",
     "ja",
     "https://cdn-img.comic-days.com/public/page",
-    isPaginated = true,
 ) {
 
     override val client: OkHttpClient = super.client.newBuilder()

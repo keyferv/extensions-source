@@ -1,7 +1,9 @@
 ext {
     extName = 'LectorJPG'
     extClass = '.LectorJpg'
-    extVersionCode = 44
+    themePkg = 'mangaesp'
+    baseUrl = 'https://lectorjpg.com'
+    overrideVersionCode = 0
     isNsfw = true
 }
 

@@ -3,7 +3,7 @@ ext {
     extClass = '.GenzToons'
     themePkg = 'keyoapp'
     baseUrl = 'https://genzupdates.com'
-    overrideVersionCode = 31
+    overrideVersionCode = 30
     isNsfw = false
 }
 

@@ -99,9 +99,3 @@ data class PicaImage(
     val path: String,
     val fileServer: String,
 )
-
-@Serializable
-data class PicaChannel(
-    val status: String,
-    val addresses: List<String>,
-)

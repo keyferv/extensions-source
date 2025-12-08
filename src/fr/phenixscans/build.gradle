@@ -2,7 +2,7 @@ ext {
     extName = 'PhenixScans'
     extClass = '.PhenixScans'
     baseUrl = 'https://phenix-scans.com'
-    extVersionCode = 35
+    extVersionCode = 33
     isNsfw = false
 }
 

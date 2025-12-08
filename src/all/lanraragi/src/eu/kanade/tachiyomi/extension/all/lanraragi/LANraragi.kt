@@ -35,7 +35,6 @@ import rx.schedulers.Schedulers
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.IOException
-import java.net.URL
 import java.security.MessageDigest
 import kotlin.math.max
 
@@ -139,12 +138,7 @@ open class LANraragi(private val suffix: String = "") : ConfigurableSource, Unme
         val archivePage = json.decodeFromString<ArchivePage>(response.body.string())
 
         return archivePage.pages.mapIndexed { index, url ->
-            var newUrl = url
-            val subPath = URL(baseUrl).path
-            if (!subPath.isNullOrEmpty()) {
-                newUrl = newUrl.replaceFirst(subPath, "")
-            }
-            val uri = Uri.parse("${baseUrl}${newUrl.trimStart('.')}")
+            val uri = Uri.parse("${baseUrl}${url.trimStart('.')}")
             Page(index, uri.toString(), uri.toString(), uri)
         }
     }

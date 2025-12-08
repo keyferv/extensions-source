@@ -1,25 +1,20 @@
 package eu.kanade.tachiyomi.extension.zh.zaimanhua
 
 import android.content.SharedPreferences
-import android.util.Base64
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.ConfigurableSource
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferences
-import keiyoushi.utils.parseAs
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -45,10 +40,9 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
 
     override val name = "再漫画"
     override val baseUrl = "https://manhua.zaimanhua.com"
-    private val mobileBaseUrl = "https://m.zaimanhua.com"
     private val apiUrl = "https://v4api.zaimanhua.com/app/v1"
     private val accountApiUrl = "https://account-api.zaimanhua.com/v1"
-    private val checkTokenRegex = Regex("""$apiUrl/comic/chapter""")
+    private val checkTokenRegex = Regex("""$apiUrl/comic/(detail|chapter)""")
 
     private val json by injectLazy<Json>()
 
@@ -58,61 +52,40 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
         .rateLimit(5)
         .addInterceptor(::authIntercept)
         .addInterceptor(::imageRetryInterceptor)
-        .addInterceptor(CommentsInterceptor)
         .build()
 
     private fun authIntercept(chain: Interceptor.Chain): Response {
-        var request = chain.request()
-        val username = preferences.getString(USERNAME_PREF, "")!!
-        val password = preferences.getString(PASSWORD_PREF, "")!!
-        var token = preferences.getString(TOKEN_PREF, "")!!
-        var hasTriedLogin = false
-
-        if (request.url.toString().startsWith(apiUrl) && request.header("authorization") == null && username.isNotBlank() && password.isNotBlank()) {
-            token = getToken(username, password)
-            apiHeaders = apiHeaders.newBuilder().setToken(token).build()
-            hasTriedLogin = true
-            preferences.edit().apply {
-                if (token.isBlank()) {
-                    putString(TOKEN_PREF, "")
-                    putString(USERNAME_PREF, "")
-                    putString(PASSWORD_PREF, "").apply()
-                } else {
-                    putString(TOKEN_PREF, token).apply()
-                    request = request.newBuilder().headers(apiHeaders).build()
-                }
-            }
+        val request = chain.request()
+        if (request.url.host != "v4api.zaimanhua.com" ||
+            (!request.headers["authorization"].isNullOrBlank() && !request.url.toString().contains(checkTokenRegex))
+        ) {
+            return chain.proceed(request)
         }
+
         val response = chain.proceed(request)
-        // Only intercept chapter api requests that need token
-        if (!request.url.toString().contains(checkTokenRegex)) return response
-
-        // If chapter can read, return directly
-        val canRead = response.peekBody(Long.MAX_VALUE).string()
-            .parseAs<ResponseDto<DataWrapperDto<CanReadDto>>>().data.data?.canRead != false
-        if (canRead) return response
-
-        if (!isValid(token) && !hasTriedLogin) {
+        if (!request.headers["authorization"].isNullOrBlank() && response.peekBody(Long.MAX_VALUE).parseAs<SimpleResponseDto>().errno == 0) {
+            return response
+        }
+        var token: String = preferences.getString("TOKEN", "")!!
+        if (!isValid(token)) {
+            val username = preferences.getString("USERNAME", "")!!
+            val password = preferences.getString("PASSWORD", "")!!
             token = getToken(username, password)
-            apiHeaders = apiHeaders.newBuilder().setToken(token).build()
-            preferences.edit().apply {
-                if (token.isBlank()) {
-                    putString(TOKEN_PREF, "")
-                    putString(USERNAME_PREF, "")
-                    putString(PASSWORD_PREF, "")
-                } else {
-                    putString(TOKEN_PREF, token)
-                }
-            }.apply()
-            if (token.isBlank()) return response
-        } else if (request.header("authorization") == "Bearer $token") {
+            if (token.isBlank()) {
+                preferences.edit().putString("TOKEN", "").apply()
+                preferences.edit().putString("USERNAME", "").apply()
+                preferences.edit().putString("PASSWORD", "").apply()
+                return response
+            } else {
+                preferences.edit().putString("TOKEN", token).apply()
+                apiHeaders = apiHeaders.newBuilder().setToken(token).build()
+            }
+        } else if (!request.headers["authorization"].isNullOrBlank() && request.headers["authorization"] == "Bearer $token") {
             return response
         }
 
-        response.close()
         val authRequest = request.newBuilder().apply {
             header("authorization", "Bearer $token")
-            cacheControl(CacheControl.FORCE_NETWORK)
         }.build()
         return chain.proceed(authRequest)
     }
@@ -121,15 +94,10 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
         if (token.isNotBlank()) set("authorization", "Bearer $token")
     }
 
-    private var apiHeaders = headersBuilder().setToken(preferences.getString(TOKEN_PREF, "")!!).build()
+    private var apiHeaders = headersBuilder().setToken(preferences.getString("TOKEN", "")!!).build()
 
     private fun isValid(token: String): Boolean {
         if (token.isBlank()) return false
-        val parts = token.split(".")
-        if (parts.size != 3) throw Exception("token格式错误，不符合JWT规范")
-        val payload = Base64.decode(parts[1], Base64.DEFAULT).toString(Charsets.UTF_8).parseAs<JwtPayload>()
-        if (payload.expirationTime * 1000 < System.currentTimeMillis()) return false
-
         val response = client.newCall(
             GET(
                 "$accountApiUrl/userInfo/get",
@@ -157,14 +125,9 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
     }
 
     // Detail
-    override fun getMangaUrl(manga: SManga): String {
-        return "$mobileBaseUrl/pages/comic/detail?id=${manga.url}"
-    }
-
     // path: "/comic/detail/mangaId"
-    private fun getMangaUrl(id: String): HttpUrl = "$apiUrl/comic/detail/$id?_v=2.2.5".toHttpUrl()
     override fun mangaDetailsRequest(manga: SManga): Request =
-        GET(getMangaUrl(manga.url), apiHeaders)
+        GET("$apiUrl/comic/detail/${manga.url}?channel=android", apiHeaders)
 
     override fun mangaDetailsParse(response: Response): SManga {
         val result = response.parseAs<ResponseDto<DataWrapperDto<MangaDto>>>()
@@ -188,14 +151,9 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
     }
 
     // PageList
-    override fun getChapterUrl(chapter: SChapter): String {
-        val (mangaId, chapterId) = chapter.url.split("/", limit = 2)
-        return "$mobileBaseUrl/pages/comic/page?comic_id=$mangaId&chapter_id=$chapterId"
-    }
-
     // path: "/comic/chapter/mangaId/chapterId"
     private fun pageListApiRequest(path: String): Request =
-        GET("$apiUrl/comic/chapter/$path?_v=2.2.5", apiHeaders, USE_CACHE)
+        GET("$apiUrl/comic/chapter/$path", apiHeaders, USE_CACHE)
 
     override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
@@ -205,21 +163,12 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
         if (result.errmsg.isNotBlank()) {
             throw Exception(result.errmsg)
         } else {
-            if (!result.data.data!!.canRead) {
-                throw Exception("用户权限不足，请提升用户等级")
-            }
-            return Observable.fromCallable {
-                val images = result.data.data.images
-                val pageList = images.mapIndexedTo(ArrayList(images.size + 1)) { index, it ->
+            return Observable.just(
+                result.data.data!!.images.mapIndexed { index, it ->
                     val fragment = json.encodeToString(ImageRetryParamsDto(chapter.url, index))
                     Page(index, imageUrl = "$it#$fragment")
-                }
-                if (preferences.getBoolean(COMMENTS_PREF, false)) {
-                    val (mangaId, chapterId) = chapter.url.split("/", limit = 2)
-                    pageList.add(Page(pageList.size, COMMENTS_FLAG, chapterCommentsUrl(mangaId, chapterId)))
-                }
-                pageList
-            }
+                },
+            )
         }
     }
 
@@ -227,7 +176,7 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
         val request = chain.request()
         val response = chain.proceed(request)
         val fragment = request.url.fragment
-        if (response.isSuccessful || request.tag(String::class) != IMAGE_RETRY_FLAG || fragment == null) return response
+        if (response.isSuccessful || request.url.host != "images.zaimanhua.com" || fragment == null) return response
         response.close()
 
         val params = json.decodeFromString<ImageRetryParamsDto>(fragment)
@@ -239,14 +188,6 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
             val imageUrl = result.data.data!!.images[params.index]
             return chain.proceed(GET(imageUrl, headers))
         }
-    }
-
-    override fun imageRequest(page: Page): Request {
-        val flag = if (page.url == COMMENTS_FLAG) COMMENTS_FLAG else IMAGE_RETRY_FLAG
-        val reqHeaders = if (page.url == COMMENTS_FLAG) apiHeaders else headers
-        return GET(page.imageUrl!!, reqHeaders).newBuilder()
-            .tag(String::class, flag)
-            .build()
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
@@ -263,35 +204,24 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
         apiHeaders,
     )
 
-    private fun genreApiUrl(): HttpUrl.Builder =
-        "$apiUrl/comic/filter/list".toHttpUrl().newBuilder()
-            .addQueryParameter("size", DEFAULT_PAGE_SIZE.toString())
-
     override fun popularMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
 
     // Search
     private fun searchApiUrl(): HttpUrl.Builder =
         "$apiUrl/search/index".toHttpUrl().newBuilder().addQueryParameter("source", "0")
-            .addQueryParameter("size", DEFAULT_PAGE_SIZE.toString())
+            .addQueryParameter("size", "20")
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val ranking = filters.firstInstanceOrNull<RankingGroup>()
-        val genres = filters.firstInstanceOrNull<GenreGroup>()
-        val searchById = filters.firstInstanceOrNull<SearchByIdFilter>()?.state ?: false
-        val url = when {
-            query.isEmpty() && ranking != null && (ranking.state[0] as TimeFilter).state != 0 -> rankApiUrl().apply {
-                ranking.state.filterIsInstance<QueryFilter>().forEach { it.addQuery(this) }
+        val ranking = filters.filterIsInstance<RankingGroup>().firstOrNull()
+        val url = if (query.isEmpty() && ranking != null) {
+            rankApiUrl().apply {
+                ranking.state.filterIsInstance<QueryFilter>().forEach {
+                    it.addQuery(this)
+                }
                 addQueryParameter("page", page.toString())
             }.build()
-
-            query.isEmpty() && genres != null -> genreApiUrl().apply {
-                genres.state.filterIsInstance<QueryFilter>().forEach { it.addQuery(this) }
-                addQueryParameter("page", page.toString())
-            }.build()
-
-            query.isNotBlank() && searchById && query.toIntOrNull()?.let { it > 0 } ?: false -> getMangaUrl(query)
-
-            else -> searchApiUrl().apply {
+        } else {
+            searchApiUrl().apply {
                 addQueryParameter("keyword", query)
                 addQueryParameter("page", page.toString())
             }.build()
@@ -299,17 +229,12 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
         return GET(url, apiHeaders)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val url = response.request.url
-        return if (url.toString().startsWith("$apiUrl/comic/rank/list")) {
+    override fun searchMangaParse(response: Response): MangasPage =
+        if (response.request.url.toString().startsWith("$apiUrl/comic/rank/list")) {
             latestUpdatesParse(response)
-        } else if (url.toString().startsWith("$apiUrl/comic/detail")) {
-            MangasPage(listOf(mangaDetailsParse(response)), false)
         } else {
-            // "$apiUrl/comic/filter/list" or "$apiUrl/search/index"
-            response.parseAs<ResponseDto<PageDto>>().data.toMangasPage(url.queryParameter("page")!!.toInt())
+            response.parseAs<ResponseDto<PageDto>>().data.toMangasPage()
         }
-    }
 
     // Latest
     // "$apiUrl/comic/update/list/1/$page" is same content
@@ -325,64 +250,41 @@ class Zaimanhua : HttpSource(), ConfigurableSource {
     }
 
     override fun getFilterList() = FilterList(
-        SearchByIdFilter(),
         RankingGroup(),
-        Filter.Separator(),
-        Filter.Header("分类(搜索/查看排行榜时无效)"),
-        GenreGroup(),
     )
-
-    private fun chapterCommentsUrl(comicId: String, chapterId: String) = "$apiUrl/viewpoint/list?comicId=$comicId&chapterId=$chapterId"
 
     companion object {
         val USE_CACHE = CacheControl.Builder().maxStale(170, TimeUnit.SECONDS).build()
-        const val USERNAME_PREF = "USERNAME"
-        const val PASSWORD_PREF = "PASSWORD"
-        const val TOKEN_PREF = "TOKEN"
-        const val COMMENTS_PREF = "COMMENTS"
-        const val COMMENTS_FLAG = "COMMENTS"
-        const val IMAGE_RETRY_FLAG = "IMAGE_RETRY"
-        const val DEFAULT_PAGE_SIZE = 20
     }
-
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
-            SwitchPreferenceCompat(screen.context).apply {
-                key = COMMENTS_PREF
-                title = "章末吐槽页"
-                summary = "修改后，已加载的章节需要清除章节缓存才能生效。"
-                setDefaultValue(false)
-            }.let(screen::addPreference)
-
             EditTextPreference(screen.context).apply {
-                key = USERNAME_PREF
+                key = "USERNAME"
                 title = "用户名"
                 summary = "该配置被修改后，会清空令牌(Token)以便重新登录；如果登录失败，会清空该配置"
                 setOnPreferenceChangeListener { _, _ ->
                     // clean token after username/password changed
-                    preferences.edit().putString(TOKEN_PREF, "").apply()
-                    apiHeaders = apiHeaders.newBuilder().setToken("").build()
+                    preferences.edit().putString("TOKEN", "").apply()
                     true
                 }
             }.let(screen::addPreference)
 
             EditTextPreference(screen.context).apply {
-                key = PASSWORD_PREF
+                key = "PASSWORD"
                 title = "密码"
                 summary = "该配置被修改后，会清空令牌(Token)以便重新登录；如果登录失败，会清空该配置"
                 setOnPreferenceChangeListener { _, _ ->
                     // clean token after username/password changed
-                    preferences.edit().putString(TOKEN_PREF, "").apply()
-                    apiHeaders = apiHeaders.newBuilder().setToken("").build()
+                    preferences.edit().putString("TOKEN", "").apply()
                     true
                 }
             }.let(screen::addPreference)
 
             EditTextPreference(screen.context).apply {
-                key = TOKEN_PREF
+                key = "TOKEN"
                 title = "令牌(Token)"
                 summary = "当前登录状态：${
-                if (preferences.getString(TOKEN_PREF, "").isNullOrEmpty()) "未登录" else "已登录"
+                if (preferences.getString("TOKEN", "").isNullOrEmpty()) "未登录" else "已登录"
                 }\n填写用户名和密码后，不会立刻尝试登录，会在下次请求时自动尝试"
 
                 setEnabled(false)

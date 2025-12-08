@@ -1,11 +1,11 @@
 package eu.kanade.tachiyomi.extension.id.mangkomik
 
 import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
-import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import kotlinx.serialization.json.decodeFromStream
-import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.io.IOException
@@ -14,7 +14,7 @@ import java.util.Locale
 
 class SirenKomik : MangaThemesia(
     "Siren Komik",
-    "https://sirenkomik.xyz",
+    "https://sirenkomik.my.id",
     "id",
     dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("id")),
 ) {
@@ -42,19 +42,11 @@ class SirenKomik : MangaThemesia(
             ?.let { postIdRegex.find(it)?.groups?.get(1)?.value }
             ?: throw IOException("Post ID not found")
 
-        val payload = FormBody.Builder()
-            .add("action", "get_image_json")
-            .add("post_id", postId)
+        val pageUrl = "$baseUrl/wp-json/extras/v1/get-img-json".toHttpUrl().newBuilder()
+            .addQueryParameter("post_id", postId)
             .build()
 
-        val response = client.newCall(POST("$baseUrl/wp-admin/admin-ajax.php", headers, payload))
-            .execute()
-
-        if (response.isSuccessful.not()) {
-            throw IOException("Pages not found")
-        }
-
-        val dto = response.use {
+        val dto = client.newCall(GET(pageUrl, headers)).execute().use {
             json.decodeFromStream<SirenKomikDto>(it.body.byteStream())
         }
 
@@ -64,6 +56,6 @@ class SirenKomik : MangaThemesia(
     }
 
     companion object {
-        val postIdRegex = """chapter_id\s*=\s*(\d+)""".toRegex()
+        val postIdRegex = """postId.:(\d+)""".toRegex()
     }
 }

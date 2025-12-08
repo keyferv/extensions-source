@@ -1,18 +1,21 @@
 package eu.kanade.tachiyomi.extension.pt.windscan
 
-import eu.kanade.tachiyomi.multisrc.greenshit.GreenShit
+import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import java.text.SimpleDateFormat
+import java.util.Locale
 
-class WindScan : GreenShit(
+class WindScan : Madara(
     "Wind Scan",
     "https://windscan.xyz",
     "pt-BR",
-    scanId = 6,
+    dateFormat = SimpleDateFormat("MMMMM dd, yyyy", Locale("pt", "BR")),
 ) {
-    // Moved from Madara to GreenShit
-    override val versionId = 2
-
     override val client = super.client.newBuilder()
         .rateLimit(2)
         .build()
+
+    override val useLoadMoreRequest = LoadMoreStrategy.Never
+
+    override val useNewChapterEndpoint = true
 }

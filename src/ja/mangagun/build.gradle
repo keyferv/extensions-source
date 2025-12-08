@@ -1,14 +1,10 @@
 ext {
-    extName = 'NihonKuni'
+    extName = 'MangaGun'
     extClass = '.MangaGun'
     themePkg = 'fmreader'
-    baseUrl = 'https://nihonkuni.com'
-    overrideVersionCode = 6
+    baseUrl = 'https://mangagun.net'
+    overrideVersionCode = 2
     isNsfw = true
 }
 
 apply from: "$rootDir/common.gradle"
-
-dependencies {
-    implementation(project(":lib:cookieinterceptor"))
-}

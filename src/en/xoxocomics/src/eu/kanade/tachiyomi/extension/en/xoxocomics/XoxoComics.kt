@@ -61,12 +61,7 @@ class XoxoComics : WPComics(
         val filterList = filters.let { if (it.isEmpty()) getFilterList() else it }
         return if (query.isNotEmpty() || filterList.isEmpty()) {
             // Search won't work together with filter
-            val url = baseUrl.toHttpUrl().newBuilder()
-                .addPathSegment(searchPath)
-                .addQueryParameter("keyword", query)
-                .addQueryParameter("page", page.toString())
-                .build()
-            return GET(url, headers)
+            return GET("$baseUrl/$searchPath?keyword=$query&page=$page", headers)
         } else {
             val url = baseUrl.toHttpUrl().newBuilder()
 
@@ -114,7 +109,7 @@ class XoxoComics : WPComics(
         }
     }
 
-    override fun pageListRequest(chapter: SChapter): Request = GET(baseUrl + "${chapter.url}/all", headers)
+    override fun pageListRequest(chapter: SChapter): Request = GET(baseUrl + "${chapter.url}/all")
 
     override fun genresRequest() = GET("$baseUrl/comic-list", headers)
 

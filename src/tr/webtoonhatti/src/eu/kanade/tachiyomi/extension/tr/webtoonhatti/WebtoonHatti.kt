@@ -6,9 +6,9 @@ import java.util.Locale
 
 class WebtoonHatti : Madara(
     "Webtoon Hatti",
-    "https://webtoonhatti.club",
+    "https://webtoonhatti.me",
     "tr",
-    dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ROOT),
+    dateFormat = SimpleDateFormat("dd MMMM", Locale("tr")),
 ) {
     override val useNewChapterEndpoint = false
 

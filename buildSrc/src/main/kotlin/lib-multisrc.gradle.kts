@@ -38,7 +38,7 @@ kotlinter {
 
 dependencies {
     compileOnly(versionCatalogs.named("libs").findBundle("common").get())
-    implementation(project(":core"))
+    implementation(project(":utils"))
 }
 
 tasks {

@@ -11,15 +11,16 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
+import uy.kohesive.injekt.injectLazy
+import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -30,8 +31,7 @@ class BatCave : HttpSource() {
     override val supportsLatest = true
     override val baseUrl = "https://batcave.biz"
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+    private val json: Json by injectLazy()
 
     override fun popularMangaRequest(page: Int) = searchMangaRequest(page, "", SortFilter.POPULAR)
     override fun popularMangaParse(response: Response) = searchMangaParse(response)
@@ -54,11 +54,11 @@ class BatCave : HttpSource() {
         var filtersApplied = false
 
         val url = "$baseUrl/comix/".toHttpUrl().newBuilder().apply {
-            filters.firstInstanceOrNull<YearFilter>()?.addFilterToUrl(this)
+            filters.get<YearFilter>()?.addFilterToUrl(this)
                 ?.also { filtersApplied = it }
-            filters.firstInstanceOrNull<PublisherFilter>()?.addFilterToUrl(this)
+            filters.get<PublisherFilter>()?.addFilterToUrl(this)
                 ?.also { filtersApplied = filtersApplied || it }
-            filters.firstInstanceOrNull<GenreFilter>()?.addFilterToUrl(this)
+            filters.get<GenreFilter>()?.addFilterToUrl(this)
                 ?.also { filtersApplied = filtersApplied || it }
 
             if (filtersApplied) {
@@ -69,7 +69,7 @@ class BatCave : HttpSource() {
             }
         }.build().toString()
 
-        val sort = filters.firstInstanceOrNull<SortFilter>()!!
+        val sort = filters.get<SortFilter>()!!
 
         return if (sort.getSort() == "") {
             GET(url, headers)
@@ -180,10 +180,6 @@ class BatCave : HttpSource() {
             thumbnail_url = document.selectFirst("div.page__poster img")?.absUrl("src")
             description = document.selectFirst("div.page__text")?.wholeText()
             author = document.selectFirst(".page__list > li:has(> div:contains(Publisher))")?.ownText()
-            genre = buildList {
-                document.select("div.page__tags a").mapTo(this) { it.text() }
-                add("Comic")
-            }.joinToString()
             status = when (document.selectFirst(".page__list > li:has(> div:contains(release type))")?.ownText()?.trim()) {
                 "Ongoing" -> SManga.ONGOING
                 "Complete" -> SManga.COMPLETED
@@ -205,7 +201,11 @@ class BatCave : HttpSource() {
                 url = "/reader/${data.comicId}/${chap.id}${data.xhash}"
                 name = chap.title
                 chapter_number = chap.number
-                date_upload = dateFormat.tryParse(chap.date)
+                date_upload = try {
+                    dateFormat.parse(chap.date)?.time ?: 0
+                } catch (_: ParseException) {
+                    0
+                }
             }
         }
     }
@@ -226,17 +226,15 @@ class BatCave : HttpSource() {
         }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = headersBuilder().apply {
-            if (!page.imageUrl!!.toHttpUrl().host.contains("batcave")) {
-                removeAll("Referer")
-            }
-        }.build()
-
-        return GET(page.imageUrl!!, imageHeaders)
-    }
-
     override fun imageUrlParse(response: Response): String {
         throw UnsupportedOperationException()
+    }
+
+    private inline fun <reified T> FilterList.get(): T? {
+        return filterIsInstance<T>().firstOrNull()
+    }
+
+    private inline fun <reified T> String.parseAs(): T {
+        return json.decodeFromString(this)
     }
 }

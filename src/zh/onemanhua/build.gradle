@@ -1,7 +1,9 @@
 ext {
     extName = 'COLAMANGA'
     extClass = '.Onemanhua'
-    extVersionCode = 26
+    themePkg = 'colamanga'
+    baseUrl = 'https://www.colamanga.com'
+    overrideVersionCode = 15
     isNsfw = true
 }
 

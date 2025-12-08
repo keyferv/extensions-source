@@ -4,7 +4,6 @@ import eu.kanade.tachiyomi.multisrc.multichan.MultiChan
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 
 class YaoiChan : MultiChan("YaoiChan", "https://yaoi-chan.me", "ru") {
@@ -13,13 +12,7 @@ class YaoiChan : MultiChan("YaoiChan", "https://yaoi-chan.me", "ru") {
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = if (query.isNotEmpty()) {
-            baseUrl.toHttpUrl().newBuilder()
-                .addQueryParameter("do", "search")
-                .addQueryParameter("subaction", "search")
-                .addQueryParameter("story", query)
-                .addQueryParameter("search_start", page.toString())
-                .build()
-                .toString()
+            "$baseUrl/?do=search&subaction=search&story=$query&search_start=$page"
         } else {
             var genres = ""
             var order = ""

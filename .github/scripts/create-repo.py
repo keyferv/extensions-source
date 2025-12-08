@@ -79,7 +79,6 @@ for apk in REPO_APK_DIR.iterdir():
                 "lang": source["lang"],
                 "id": source["id"],
                 "baseUrl": source["baseUrl"],
-                "versionId": source["versionId"],
             }
         )
 

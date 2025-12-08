@@ -8,7 +8,6 @@ class ShonenJumpPlus : GigaViewer(
     "https://shonenjumpplus.com",
     "ja",
     "https://cdn-ak-img.shonenjumpplus.com",
-    isPaginated = true,
 ) {
 
     override val client: OkHttpClient = super.client.newBuilder()

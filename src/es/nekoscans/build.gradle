@@ -1,9 +1,9 @@
 ext {
     extName = 'NekoScans'
     extClass = '.NekoScans'
-    themePkg = 'mangathemesia'
-    baseUrl = 'https://nekoscans.org'
-    overrideVersionCode = 6
+    themePkg = 'zeistmanga'
+    baseUrl = 'https://nekoscanlationlector.blogspot.com'
+    overrideVersionCode = 25
     isNsfw = true
 }
 

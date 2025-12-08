@@ -1,8 +1,7 @@
 ext {
     extName = 'Sadscans'
     extClass = '.Sadscans'
-    extVersionCode = 3
-    isNsfw = false
+    extVersionCode = 2
 }
 
 apply from: "$rootDir/common.gradle"

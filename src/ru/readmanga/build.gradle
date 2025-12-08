@@ -2,7 +2,7 @@ ext {
     extName = 'ReadManga'
     extClass = '.ReadManga'
     themePkg = 'grouple'
-    baseUrl = 'https://a.zazaza.me'
+    baseUrl = 'https://zz.readmanga.io'
     overrideVersionCode = 47
 }
 

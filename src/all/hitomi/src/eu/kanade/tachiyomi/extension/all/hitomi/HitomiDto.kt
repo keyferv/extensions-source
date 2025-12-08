@@ -24,7 +24,7 @@ class ImageFile(
     val hash: String,
     private val name: String,
 ) {
-    val isGif get() = name.endsWith(".gif") || name.endsWith(".webp")
+    val isGif get() = name.endsWith(".gif")
 }
 
 @Serializable

@@ -1,13 +1,7 @@
 package eu.kanade.tachiyomi.extension.en.templescan
 
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.lib.randomua.addRandomUAPreferenceToScreen
-import eu.kanade.tachiyomi.lib.randomua.getPrefCustomUA
-import eu.kanade.tachiyomi.lib.randomua.getPrefUAType
-import eu.kanade.tachiyomi.lib.randomua.setRandomUserAgent
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -16,7 +10,6 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.getPreferences
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.Request
@@ -25,7 +18,7 @@ import rx.Observable
 import uy.kohesive.injekt.injectLazy
 import kotlin.math.min
 
-class TempleScan : HttpSource(), ConfigurableSource {
+class TempleScan : HttpSource() {
 
     override val name = "Temple Scan"
 
@@ -37,18 +30,12 @@ class TempleScan : HttpSource(), ConfigurableSource {
 
     override val versionId = 3
 
-    private val preferences = getPreferences()
-
     override fun headersBuilder() = super.headersBuilder()
         .set("referer", "$baseUrl/")
         .set("origin", baseUrl)
 
     override val client = network.cloudflareClient.newBuilder()
         .rateLimit(1)
-        .setRandomUserAgent(
-            preferences.getPrefUAType(),
-            preferences.getPrefCustomUA(),
-        )
         .build()
 
     private val json: Json by injectLazy()
@@ -209,16 +196,9 @@ class TempleScan : HttpSource(), ConfigurableSource {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        return IMAGES_REGEX.find(response.body.string())!!.groupValues[1]
-            .unescape()
-            .parseAs<List<String>>()
-            .mapIndexed { index, image ->
-                Page(index, imageUrl = image)
-            }
-    }
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        addRandomUAPreferenceToScreen(screen)
+        return response.asJsoup().select("img[alt^=chapter]").mapIndexed { idx, img ->
+            Page(idx, imageUrl = img.absUrl("src"))
+        }
     }
 
     private fun String.unescape(): String {
@@ -243,4 +223,3 @@ class TempleScan : HttpSource(), ConfigurableSource {
 
 private val UNESCAPE_REGEX = """\\(.)""".toRegex()
 private val DETAILS_REGEX = Regex("""info\\":(\{.*\}).*userIsFollowed""")
-private val IMAGES_REGEX = Regex("""images\\":(\[.*?]).*""")

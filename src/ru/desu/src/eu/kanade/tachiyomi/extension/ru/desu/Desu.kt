@@ -139,25 +139,22 @@ class Desu : ConfigurableSource, HttpSource() {
     }
 
     override fun popularMangaRequest(page: Int) =
-        GET("$baseUrl$API_URL/?limit=50&order=popular&page=$page", headers)
+        GET("$baseUrl$API_URL/?limit=50&order=popular&page=$page")
 
     override fun popularMangaParse(response: Response) = searchMangaParse(response)
 
     override fun latestUpdatesRequest(page: Int) =
-        GET("$baseUrl$API_URL/?limit=50&order=updated&page=$page", headers)
+        GET("$baseUrl$API_URL/?limit=50&order=updated&page=$page")
 
     override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl$API_URL/".toHttpUrl().newBuilder()
-            .addQueryParameter("limit", "20")
-            .addQueryParameter("page", page.toString())
-
+        var url = "$baseUrl$API_URL/?limit=20&page=$page"
         val types = mutableListOf<Type>()
         val genres = mutableListOf<Genre>()
         (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->
             when (filter) {
-                is OrderBy -> url.addQueryParameter("order", arrayOf("popular", "updated", "name")[filter.state])
+                is OrderBy -> url += "&order=" + arrayOf("popular", "updated", "name")[filter.state]
                 is TypeList -> filter.state.forEach { type -> if (type.state) types.add(type) }
                 is GenreList -> filter.state.forEach { genre -> if (genre.state) genres.add(genre) }
                 else -> {}
@@ -165,15 +162,15 @@ class Desu : ConfigurableSource, HttpSource() {
         }
 
         if (types.isNotEmpty()) {
-            url.addQueryParameter("kinds", types.joinToString(",") { it.id })
+            url += "&kinds=" + types.joinToString(",") { it.id }
         }
         if (genres.isNotEmpty()) {
-            url.addQueryParameter("genres", genres.joinToString(",") { it.id })
+            url += "&genres=" + genres.joinToString(",") { it.id }
         }
         if (query.isNotEmpty()) {
-            url.addQueryParameter("search", query)
+            url += "&search=$query"
         }
-        return GET(url.build(), headers)
+        return GET(url)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
@@ -401,6 +398,6 @@ class Desu : ConfigurableSource, HttpSource() {
 
         private const val DOMAIN_TITLE = "Домен"
         private const val DEFAULT_DOMAIN_PREF = "default_domain"
-        private const val DOMAIN_DEFAULT = "https://desu.city"
+        private const val DOMAIN_DEFAULT = "https://desu.store"
     }
 }

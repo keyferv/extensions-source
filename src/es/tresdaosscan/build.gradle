@@ -2,8 +2,8 @@ ext {
     extName = 'Tres Daos Scan'
     extClass = '.TresDaosScan'
     themePkg = 'mangathemesia'
-    baseUrl = 'https://threedaos.zdrz.xyz'
-    overrideVersionCode = 11
+    baseUrl = 'https://tresdaos.com'
+    overrideVersionCode = 8
     isNsfw = false
 }
 

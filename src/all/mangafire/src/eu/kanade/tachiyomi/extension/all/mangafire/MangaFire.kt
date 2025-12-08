@@ -1,10 +1,8 @@
 package eu.kanade.tachiyomi.extension.all.mangafire
 
-import android.annotation.SuppressLint
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -14,10 +12,9 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.int
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -27,13 +24,10 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import rx.Observable
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
+import uy.kohesive.injekt.injectLazy
+import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Locale
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 
 class MangaFire(
     override val lang: String,
@@ -44,39 +38,15 @@ class MangaFire(
     override val baseUrl = "https://mangafire.to"
 
     override val supportsLatest = true
+
+    private val json: Json by injectLazy()
+
     private val preferences by getPreferencesLazy()
 
-    override val client = network.cloudflareClient.newBuilder()
-        .addInterceptor(ImageInterceptor)
-        .apply {
-            val naiveTrustManager = @SuppressLint("CustomX509TrustManager")
-            object : X509TrustManager {
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-                override fun checkClientTrusted(certs: Array<X509Certificate>, authType: String) = Unit
-                override fun checkServerTrusted(certs: Array<X509Certificate>, authType: String) = Unit
-            }
-
-            val insecureSocketFactory = SSLContext.getInstance("SSL").apply {
-                val trustAllCerts = arrayOf<TrustManager>(naiveTrustManager)
-                init(null, trustAllCerts, SecureRandom())
-            }.socketFactory
-
-            sslSocketFactory(insecureSocketFactory, naiveTrustManager)
-            hostnameVerifier { _, _ -> true }
-        }
-        .build()
+    override val client = network.cloudflareClient.newBuilder().addInterceptor(ImageInterceptor).build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
-
-    private val webViewHelper = WebViewHelper(client, headers)
-
-    // dirty hack to disable suggested mangas on Komikku
-    // we don't want to spawn N webviews for N search token
-    // https://github.com/komikku-app/komikku/blob/4323fd5841b390213aa4c4af77e07ad42eb423fc/source-api/src/commonMain/kotlin/eu/kanade/tachiyomi/source/CatalogueSource.kt#L176-L184
-    @Suppress("Unused")
-    @JvmName("getDisableRelatedMangasBySearch")
-    fun disableRelatedMangasBySearch() = true
 
     // ============================== Popular ===============================
 
@@ -104,18 +74,12 @@ class MangaFire(
 
     // =============================== Search ===============================
 
-    private val vrfCache = object : LinkedHashMap<String, String>() {
-        override fun removeEldestEntry(eldest: Map.Entry<String?, String?>?) = size > 20
-    }
-
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val stdQuery = query.replace("\"", " ").trim()
-
         val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment("filter")
 
-            if (stdQuery.isNotBlank()) {
-                addQueryParameter("keyword", stdQuery)
+            if (query.isNotBlank()) {
+                addQueryParameter("keyword", query)
             }
 
             val filterList = filters.ifEmpty { getFilterList() }
@@ -125,42 +89,6 @@ class MangaFire(
 
             addQueryParameter("language[]", langCode)
             addQueryParameter("page", page.toString())
-
-            if (stdQuery.isNotBlank()) {
-                val vrf = vrfCache.get(stdQuery)
-                    ?: runBlocking {
-                        webViewHelper.loadInWebView(
-                            url = "$baseUrl/home",
-                            requestIntercept = { request ->
-                                val url = request.url
-                                if (
-                                    url.host == "mangafire.to" &&
-                                    url.encodedPath.orEmpty().contains("ajax/manga/search")
-                                ) {
-                                    WebViewHelper.RequestIntercept.Capture
-                                } else {
-                                    WebViewHelper.RequestIntercept.Block
-                                }
-                            },
-                            onPageFinish = { view ->
-                                view.evaluateJavascript(
-                                    """
-                                    $(function() {
-                                      setInterval(() => {
-                                        $(".search-inner input[name=keyword]").val("$stdQuery").trigger("keyup");
-                                      }, 1000);
-                                    });
-                                    """.trimIndent(),
-                                ) {}
-                            },
-                        )
-                    }.toHttpUrl().queryParameter("vrf")
-                        ?.takeIf { it.isNotBlank() }
-                        ?.also { vrfCache.put(stdQuery, it) }
-                    ?: throw Exception("Unable to find vrf token")
-
-                addQueryParameter("vrf", vrf)
-            }
         }.build()
 
         return GET(url, headers)
@@ -257,89 +185,90 @@ class MangaFire(
         return baseUrl + chapter.url.substringBeforeLast("#")
     }
 
-    override fun chapterListRequest(manga: SManga): Request {
-        val mangaId = manga.url.removeSuffix(VOLUME_URL_SUFFIX).substringAfterLast(".")
-        val type = if (manga.url.endsWith(VOLUME_URL_SUFFIX)) "volume" else "chapter"
-
-        return GET("$baseUrl/ajax/manga/$mangaId/$type/$langCode", headers)
+    private fun getAjaxRequest(ajaxType: String, mangaId: String, chapterType: String): Request {
+        return GET("$baseUrl/ajax/$ajaxType/$mangaId/$chapterType/$langCode", headers)
     }
 
+    @Serializable
+    class AjaxReadDto(
+        val html: String,
+    )
+
     override fun chapterListParse(response: Response): List<SChapter> {
-        val isVolume = response.request.url.pathSegments.contains("volume")
+        throw UnsupportedOperationException()
+    }
 
-        val mangaList = response.parseAs<ResponseDto<String>>().result
-            .toBodyFragment()
-            .select(if (isVolume) ".vol-list > .item" else "li")
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+        val path = manga.url
+        val mangaId = path.removeSuffix(VOLUME_URL_SUFFIX).substringAfterLast(".")
+        val isVolume = path.endsWith(VOLUME_URL_SUFFIX)
 
+        val type = if (isVolume) "volume" else "chapter"
         val abbrPrefix = if (isVolume) "Vol" else "Chap"
         val fullPrefix = if (isVolume) "Volume" else "Chapter"
 
-        return mangaList.map { m ->
-            val link = m.selectFirst("a")!!
+        val ajaxMangaList = client.newCall(getAjaxRequest("manga", mangaId, type))
+            .execute().parseAs<ResponseDto<String>>().result
+            .toBodyFragment()
+            .select(if (isVolume) ".vol-list > .item" else "li")
+
+        val ajaxReadList = client.newCall(getAjaxRequest("read", mangaId, type))
+            .execute().parseAs<ResponseDto<AjaxReadDto>>().result.html
+            .toBodyFragment()
+            .select("ul a")
+
+        val chapterList = ajaxMangaList.zip(ajaxReadList) { m, r ->
+            val link = r.selectFirst("a")!!
+            if (!r.attr("abs:href").toHttpUrl().pathSegments.last().contains(type)) {
+                return Observable.just(emptyList())
+            }
+
+            assert(m.attr("data-number") == r.attr("data-number")) {
+                "Chapter count doesn't match. Try updating again."
+            }
 
             val number = m.attr("data-number")
             val dateStr = m.select("span").getOrNull(1)?.text() ?: ""
 
             SChapter.create().apply {
-                setUrlWithoutDomain(link.attr("href"))
+                setUrlWithoutDomain("${link.attr("href")}#$type/${r.attr("data-id")}")
                 chapter_number = number.toFloatOrNull() ?: -1f
                 name = run {
-                    val name = m.selectFirst("span")!!.text()
+                    val name = link.text()
                     val prefix = "$abbrPrefix $number: "
                     if (!name.startsWith(prefix)) return@run name
                     val realName = name.removePrefix(prefix)
                     if (realName.contains(number)) realName else "$fullPrefix $number: $realName"
                 }
-                date_upload = dateFormat.tryParse(dateStr)
+
+                date_upload = try {
+                    dateFormat.parse(dateStr)!!.time
+                } catch (_: ParseException) {
+                    0L
+                }
             }
         }
+
+        return Observable.just(chapterList)
     }
 
     // =============================== Pages ================================
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
-        val intercepted = runBlocking {
-            webViewHelper.loadInWebView(
-                url = "$baseUrl${chapter.url}",
-                requestIntercept = { request ->
-                    val url = request.url
-                    if (
-                        url.host == "mangafire.to" &&
-                        url.encodedPath.orEmpty().contains("ajax/read")
-                    ) {
-                        if (setOf("ajax/read/chapter", "ajax/read/volume").any { url.encodedPath!!.contains(it) }) {
-                            WebViewHelper.RequestIntercept.Capture
-                        } else {
-                            // need to allow other call to ajax/read
-                            WebViewHelper.RequestIntercept.Allow
-                        }
-                    } else {
-                        WebViewHelper.RequestIntercept.Block
-                    }
-                },
-                onPageFinish = {},
-            )
-        }
-        if (intercepted.toHttpUrl().queryParameter("vrf") == null) {
-            throw Exception("Unable to find vrf token")
-        }
-
-        return client.newCall(GET(intercepted, headers))
-            .asObservableSuccess().map {
-                it.parseAs<ResponseDto<PageListDto>>().result
-                    .pages.mapIndexed { index, image ->
-                        val url = image.url
-                        val offset = image.offset
-                        val imageUrl =
-                            if (offset > 0) "$url#${ImageInterceptor.SCRAMBLED}_$offset" else url
-
-                        Page(index, imageUrl = imageUrl)
-                    }
-            }
+    override fun pageListRequest(chapter: SChapter): Request {
+        val typeAndId = chapter.url.substringAfterLast('#')
+        return GET("$baseUrl/ajax/read/$typeAndId", headers)
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        throw UnsupportedOperationException()
+        val result = response.parseAs<ResponseDto<PageListDto>>().result
+
+        return result.pages.mapIndexed { index, image ->
+            val url = image.url
+            val offset = image.offset
+            val imageUrl = if (offset > 0) "$url#${ImageInterceptor.SCRAMBLED}_$offset" else url
+
+            Page(index, imageUrl = imageUrl)
+        }
     }
 
     @Serializable
@@ -372,6 +301,10 @@ class MangaFire(
     class ResponseDto<T>(
         val result: T,
     )
+
+    private inline fun <reified T> Response.parseAs(): T {
+        return json.decodeFromString(body.string())
+    }
 
     private fun String.toBodyFragment(): Document {
         return Jsoup.parseBodyFragment(this, baseUrl)

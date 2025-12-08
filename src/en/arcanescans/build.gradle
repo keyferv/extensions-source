@@ -1,9 +1,9 @@
 ext {
     extName = 'Arcanescans'
     extClass = '.Arcanescans'
-    themePkg = 'mangathemesia'
+    themePkg = 'madara'
     baseUrl = 'https://arcanescans.com'
-    overrideVersionCode = 15
+    overrideVersionCode = 0
     isNsfw = false
 }
 

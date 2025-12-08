@@ -71,7 +71,7 @@ open class NHentai(
 
     private val shortenTitleRegex = Regex("""(\[[^]]*]|[({][^)}]*[)}])""")
     private val dataRegex = Regex("""JSON\.parse\(\s*"(.*)"\s*\)""")
-    private val hentaiSelector = "script:containsData(JSON.parse):not(:containsData(media_server)):not(:containsData(avatar_url))"
+    private val hentaiSelector = "script:containsData(JSON.parse):not(:containsData(media_server))"
     private fun String.shortenTitle() = this.replace(shortenTitleRegex, "").trim()
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -208,11 +208,14 @@ open class NHentai(
     override fun searchMangaNextPageSelector() = latestUpdatesNextPageSelector()
 
     override fun mangaDetailsParse(document: Document): SManga {
-        val data = document.getHentaiData()
-        val cdnUrl = document.getCdnUrls(thumbnail = true).random()
+        val script = document.selectFirst(hentaiSelector)!!.data()
+
+        val json = dataRegex.find(script)?.groupValues!![1]
+
+        val data = json.parseAs<Hentai>()
         return SManga.create().apply {
             title = if (displayFullTitle) data.title.english ?: data.title.japanese ?: data.title.pretty!! else data.title.pretty ?: (data.title.english ?: data.title.japanese)!!.shortenTitle()
-            thumbnail_url = "https://$cdnUrl/galleries/${data.media_id}/1t.${data.images.pages[0].extension}"
+            thumbnail_url = document.select("#cover > a > img").attr("data-src")
             status = SManga.COMPLETED
             artist = getArtists(data)
             author = getGroups(data) ?: getArtists(data)
@@ -232,7 +235,12 @@ open class NHentai(
     override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl${manga.url}", headers)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.asJsoup().getHentaiData()
+        val document = response.asJsoup()
+        val script = document.selectFirst(hentaiSelector)!!.data()
+
+        val json = dataRegex.find(script)?.groupValues!![1]
+
+        val data = json.parseAs<Hentai>()
         return listOf(
             SChapter.create().apply {
                 name = "Chapter"
@@ -248,34 +256,25 @@ open class NHentai(
     override fun chapterListSelector() = throw UnsupportedOperationException()
 
     override fun pageListParse(document: Document): List<Page> {
-        val data = document.getHentaiData()
-        val cdnUrls = document.getCdnUrls(thumbnail = false)
+        val script = document.selectFirst("script:containsData(media_server)")!!.data()
+        val script2 = document.selectFirst(hentaiSelector)!!.data()
 
+        val mediaServer = Regex("""media_server\s*:\s*(\d+)""").find(script)?.groupValues!![1]
+        val json = dataRegex.find(script2)?.groupValues!![1]
+
+        val data = json.parseAs<Hentai>()
         return data.images.pages.mapIndexed { i, image ->
             Page(
-                index = i,
-                imageUrl = "https://${cdnUrls.random()}/galleries/${data.media_id}/${i + 1}.${image.extension}",
+                i,
+                imageUrl = "${baseUrl.replace("https://", "https://i$mediaServer.")}/galleries/${data.media_id}/${i + 1}" +
+                    when (image.t) {
+                        "w" -> ".webp"
+                        "p" -> ".png"
+                        "g" -> ".gif"
+                        else -> ".jpg"
+                    },
             )
         }
-    }
-
-    private fun Document.getHentaiData(): Hentai {
-        val script = selectFirst(hentaiSelector)!!.data()
-        return dataRegex.find(script)!!.groupValues[1].parseAs()
-    }
-
-    private fun Document.getCdnUrls(thumbnail: Boolean): List<String> {
-        val regex = Regex(
-            if (thumbnail) {
-                """thumb_cdn_urls:\s*(\[.*])"""
-            } else {
-                """image_cdn_urls:\s*(\[.*])"""
-            },
-        )
-        val html = body().html()
-        val cdnJson = regex.find(html)!!.groupValues[1]
-
-        return cdnJson.parseAs<List<String>>()
     }
 
     override fun getFilterList(): FilterList = FilterList(

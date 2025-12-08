@@ -27,12 +27,7 @@ class Erofus : EroMuse("Erofus", "https://www.erofus.com") {
 
             if (query.isNotBlank()) {
                 // TODO possibly add genre search if a decent list of them can be built
-                val url = baseUrl.toHttpUrl().newBuilder()
-                    .addQueryParameter("search", query)
-                    .addQueryParameter("sort", currentSortingMode)
-                    .addQueryParameter("page", "1")
-
-                pageStack.addLast(StackItem(url.toString(), SEARCH_RESULTS_OR_BASE))
+                pageStack.addLast(StackItem("$baseUrl/?search=$query&sort=$currentSortingMode&page=1", SEARCH_RESULTS_OR_BASE))
             } else {
                 val albumFilter = filterList.filterIsInstance<AlbumFilter>().first().selection()
                 val url = (baseUrl + albumFilter.pathSegments).toHttpUrl().newBuilder()

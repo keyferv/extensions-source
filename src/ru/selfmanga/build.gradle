@@ -2,7 +2,7 @@ ext {
     extName = 'SelfManga'
     extClass = '.SelfManga'
     themePkg = 'grouple'
-    baseUrl = 'https://1.selfmanga.live'
+    baseUrl = 'https://selfmanga.live'
     overrideVersionCode = 23
     isNsfw = false
 }

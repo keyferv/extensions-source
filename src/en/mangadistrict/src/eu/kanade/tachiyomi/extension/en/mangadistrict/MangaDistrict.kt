@@ -2,14 +2,9 @@ package eu.kanade.tachiyomi.extension.en.mangadistrict
 
 import android.annotation.SuppressLint
 import android.content.SharedPreferences
-import android.text.Editable
-import android.text.TextWatcher
-import android.widget.Button
-import android.widget.Toast
-import androidx.preference.CheckBoxPreference
-import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
@@ -40,7 +35,7 @@ class MangaDistrict :
     ),
     ConfigurableSource {
 
-    override val mangaSubString = "title"
+    override val mangaSubString = "read-scan"
 
     private val preferences: SharedPreferences by getPreferencesLazy {
         try {
@@ -52,19 +47,9 @@ class MangaDistrict :
         } catch (_: Exception) {}
     }
 
-    override fun popularMangaFromElement(element: Element): SManga {
-        return super.popularMangaFromElement(element).cleanTitleIfNeeded()
-    }
-
     override fun popularMangaNextPageSelector() = "div[role=navigation] span.current + a.page"
 
-    override fun latestUpdatesFromElement(element: Element): SManga {
-        return super.latestUpdatesFromElement(element).cleanTitleIfNeeded()
-    }
-
-    override fun searchMangaSelector() = popularMangaSelector()
-    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
-    override fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
+    private val titleVersion = Regex("\\(.*\\)")
 
     override fun mangaDetailsParse(document: Document): SManga {
         val tags = document.select(mangaDetailsSelectorTag).mapNotNull { element ->
@@ -73,8 +58,11 @@ class MangaDistrict :
         }
         tagList = tagList.plus(tags)
 
-        return super.mangaDetailsParse(document)
-            .cleanTitleIfNeeded()
+        return super.mangaDetailsParse(document).apply {
+            if (isRemoveTitleVersion()) {
+                title = this.title.replace(titleVersion, "").trim()
+            }
+        }
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
@@ -89,15 +77,8 @@ class MangaDistrict :
     override fun chapterFromElement(element: Element): SChapter {
         return super.chapterFromElement(element).apply {
             val urlKey = url.urlKey()
-            val dates = preferences.dates
-            dates[urlKey]?.also {
-                if (date_upload == 0L) {
-                    // If date_upload is not set (due to NEW tag), try to get it from the page lists
-                    date_upload = it
-                } else {
-                    dates.remove(urlKey)
-                    preferences.dates = dates
-                }
+            preferences.dates[urlKey]?.also {
+                date_upload = it
             }
         }
     }
@@ -177,21 +158,6 @@ class MangaDistrict :
     private fun String.urlKey(): String {
         return toHttpUrl().pathSegments.let { path ->
             "${path[1]}/${path[2]}"
-        }
-    }
-
-    private fun SManga.cleanTitleIfNeeded() = apply {
-        title = title.let { originalTitle ->
-            var tempTitle = originalTitle
-            customRemoveTitle().takeIf { it.isNotEmpty() }?.let { customRegex ->
-                runCatching {
-                    tempTitle = tempTitle.replace(Regex(customRegex), "")
-                }
-            }
-            if (isRemoveTitleVersion()) {
-                tempTitle = tempTitle.replace(titleRegex, "")
-            }
-            tempTitle.trim()
         }
     }
 
@@ -296,8 +262,6 @@ class MangaDistrict :
     )
 
     private fun isRemoveTitleVersion() = preferences.getBoolean(REMOVE_TITLE_VERSION_PREF, false)
-    private fun customRemoveTitle(): String =
-        preferences.getString("${REMOVE_TITLE_CUSTOM_PREF}_$lang", "")!!
     private fun getImgRes() = preferences.getString(IMG_RES_PREF, IMG_RES_DEFAULT)!!
 
     private var SharedPreferences.dates: MutableMap<String, Long>
@@ -313,7 +277,7 @@ class MangaDistrict :
         }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        CheckBoxPreference(screen.context).apply {
+        SwitchPreferenceCompat(screen.context).apply {
             key = REMOVE_TITLE_VERSION_PREF
             title = "Remove version information from entry titles"
             summary = "This removes version tags like “(Official)” or “(Doujinshi)” from entry titles " +
@@ -321,46 +285,6 @@ class MangaDistrict :
                 "To update existing entries, remove them from your library (unfavorite) and refresh manually. " +
                 "You might also want to clear the database in advanced settings."
             setDefaultValue(false)
-        }.let(screen::addPreference)
-
-        EditTextPreference(screen.context).apply {
-            key = "${REMOVE_TITLE_CUSTOM_PREF}_$lang"
-            title = "Custom regex to be removed from title"
-            summary = customRemoveTitle()
-            setDefaultValue("")
-
-            val validate = { str: String ->
-                runCatching { Regex(str) }
-                    .map { true to "" }
-                    .getOrElse { false to it.message }
-            }
-
-            setOnBindEditTextListener { editText ->
-                editText.addTextChangedListener(
-                    object : TextWatcher {
-                        override fun beforeTextChanged(p0: CharSequence?, p1: Int, p2: Int, p3: Int) {}
-                        override fun onTextChanged(p0: CharSequence?, p1: Int, p2: Int, p3: Int) {}
-
-                        override fun afterTextChanged(editable: Editable?) {
-                            editable ?: return
-                            val text = editable.toString()
-                            val valid = validate(text)
-                            editText.error = if (!valid.first) valid.second else null
-                            editText.rootView.findViewById<Button>(android.R.id.button1)?.isEnabled = editText.error == null
-                        }
-                    },
-                )
-            }
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val (isValid, message) = validate(newValue as String)
-                if (isValid) {
-                    summary = newValue
-                } else {
-                    Toast.makeText(screen.context, message, Toast.LENGTH_LONG).show()
-                }
-                isValid
-            }
         }.let(screen::addPreference)
 
         ListPreference(screen.context).apply {
@@ -381,11 +305,7 @@ class MangaDistrict :
     }
 
     companion object {
-        private val titleRegex: Regex =
-            Regex("\\([^()]*\\)|\\{[^{}]*\\}|\\[(?:(?!]).)*]|«[^»]*»|〘[^〙]*〙|「[^」]*」|『[^』]*』|≪[^≫]*≫|﹛[^﹜]*﹜|〖[^〖〗]*〗|\uD81A\uDD0D.+?\uD81A\uDD0D|《[^》]*》|⌜.+?⌝|⟨[^⟩]*⟩|/Official|/ Official", RegexOption.IGNORE_CASE)
-
         private const val REMOVE_TITLE_VERSION_PREF = "REMOVE_TITLE_VERSION"
-        private const val REMOVE_TITLE_CUSTOM_PREF = "REMOVE_TITLE_CUSTOM"
         private const val TAG_LIST_PREF = "TAG_LIST"
 
         private const val IMG_RES_PREF = "IMG_RES"

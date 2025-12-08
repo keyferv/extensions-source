@@ -1,14 +1,10 @@
 package eu.kanade.tachiyomi.extension.ru.comx
 
-import android.content.SharedPreferences
 import android.webkit.CookieManager
-import android.widget.Toast
-import androidx.preference.EditTextPreference
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.asObservable
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -17,7 +13,6 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -32,6 +27,7 @@ import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -44,24 +40,19 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-class ComX : ParsedHttpSource(), ConfigurableSource {
-    private val json: Json by injectLazy()
+class ComX : ParsedHttpSource() {
 
-    override val id = 1114173092141608635
+    private val json: Json by injectLazy()
 
     override val name = "Com-X"
 
-    private val preferences: SharedPreferences by getPreferencesLazy()
-
-    override val baseUrl = preferences.getString(DOMAIN_PREF, DOMAIN_DEFAULT)!!
+    override val baseUrl = "https://com-x.life"
 
     override val lang = "ru"
 
     override val supportsLatest = true
-
     private val cookieManager by lazy { CookieManager.getInstance() }
-
-    override val client = network.cloudflareClient.newBuilder()
+    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .rateLimit(3)
@@ -346,21 +337,16 @@ class ComX : ParsedHttpSource(), ConfigurableSource {
             throw Exception("Комикс 18+ (что-то сломалось)")
         }
 
-        val imageUrl = preferences.getString(FORCE_IMG_DOMAIN_PREF, null)?.ifBlank { null }
-            ?: IMG_DOMAIN_REGEX.find(html)?.groupValues?.get(1)?.let { "https://$it" }
-
-        if (imageUrl.isNullOrBlank()) {
-            throw Exception("Не удалось определить домен картинок. Попробуйте задать вручную в настройках")
-        }
+        val baseImgUrl = "https://img.com-x.life/comix/"
 
         val beginTag = "\"images\":["
         val beginIndex = html.indexOf(beginTag)
         val endIndex = html.indexOf("]", beginIndex)
 
-        val urls = html.substring(beginIndex + beginTag.length, endIndex)
+        val urls: List<String> = html.substring(beginIndex + beginTag.length, endIndex)
             .split(',').map {
                 val img = it.replace("\\", "").replace("\"", "")
-                "$imageUrl/comix/$img"
+                baseImgUrl + img
             }
 
         val pages = mutableListOf<Page>()
@@ -413,18 +399,18 @@ class ComX : ParsedHttpSource(), ConfigurableSource {
 
     override fun getFilterList() = FilterList(
         OrderBy(),
-        PubList(pubList),
-        GenreList(genreList),
-        TypeList(typeList),
-        AgeList(ageList),
+        PubList(getPubList()),
+        GenreList(getGenreList()),
+        TypeList(getTypeList()),
+        AgeList(getAgeList()),
     )
 
-    private val ageList = listOf(
+    private fun getAgeList() = listOf(
         CheckFilter("Для всех", "1"),
         CheckFilter("18+", "2"),
     )
 
-    private val typeList = listOf(
+    private fun getTypeList() = listOf(
         CheckFilter("События в комиксах", "1"),
         CheckFilter("Аннуалы", "3"),
         CheckFilter("Артбук", "4"),
@@ -444,7 +430,7 @@ class ComX : ParsedHttpSource(), ConfigurableSource {
         CheckFilter("Энциклопедия", "36"),
     )
 
-    private val pubList = listOf(
+    private fun getPubList() = listOf(
         CheckFilter("Манга", "3"),
         CheckFilter("Маньхуа", "45"),
         CheckFilter("Манхва", "44"),
@@ -467,7 +453,7 @@ class ComX : ParsedHttpSource(), ConfigurableSource {
         CheckFilter("Zenescope", "51"),
     )
 
-    private val genreList = listOf(
+    private fun getGenreList() = listOf(
         CheckFilter("Автобиографическая новелла", "9"),
         CheckFilter("Альтернативная история", "10"),
         CheckFilter("Антиутопия", "11"),
@@ -571,74 +557,7 @@ class ComX : ParsedHttpSource(), ConfigurableSource {
         CheckFilter("Ёнкома", "121"),
     )
 
-    override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = DOMAIN_PREF
-            title = "Домен"
-            summary = baseUrl
-            setDefaultValue(DOMAIN_DEFAULT)
-            setOnPreferenceChangeListener { _, newValue ->
-                try {
-                    val res =
-                        preferences.edit().putString(DOMAIN_PREF, newValue as String).commit()
-                    Toast.makeText(
-                        screen.context,
-                        "Для смены домена необходимо перезапустить приложение с полной остановкой.",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    res
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    false
-                }
-            }
-        }.let(screen::addPreference)
-
-        EditTextPreference(screen.context).apply {
-            key = FORCE_IMG_DOMAIN_PREF
-            title = "Домен картинок"
-            summary = "Переопределение домена картинок"
-            setDefaultValue("")
-            setOnPreferenceChangeListener { _, newValue ->
-                try {
-                    val res =
-                        preferences.edit().putString(FORCE_IMG_DOMAIN_PREF, newValue as String).commit()
-                    Toast.makeText(
-                        screen.context,
-                        "Для смены домена необходимо перезапустить приложение с полной остановкой.",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    res
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    false
-                }
-            }
-        }.let(screen::addPreference)
-    }
-
-    init {
-        preferences.getString(DEFAULT_DOMAIN_PREF, null).let { prefDefaultDomain ->
-            if (prefDefaultDomain != DOMAIN_DEFAULT) {
-                preferences.edit()
-                    .putString(DOMAIN_PREF, DOMAIN_DEFAULT)
-                    .putString(DEFAULT_DOMAIN_PREF, DOMAIN_DEFAULT)
-                    .apply()
-            }
-        }
-    }
-
     companion object {
         private val simpleDateFormat by lazy { SimpleDateFormat("dd.MM.yyyy", Locale.US) }
-
-        private const val DOMAIN_DEFAULT = "https://comxlife.com"
-
-        private const val DEFAULT_DOMAIN_PREF = "DEFAULT_DOMAIN_PREF"
-
-        private const val DOMAIN_PREF = "DOMAIN_PREF"
-
-        private const val FORCE_IMG_DOMAIN_PREF = "FORCE_IMG_DOMAIN_PREF"
-
-        private val IMG_DOMAIN_REGEX = "\"host\":\"(.+?)\"".toRegex()
     }
 }

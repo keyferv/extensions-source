@@ -22,7 +22,6 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import uy.kohesive.injekt.injectLazy
 import java.io.ByteArrayOutputStream
@@ -43,7 +42,7 @@ class FlameComics : HttpSource() {
         .addInterceptor(::composedImageIntercept)
         .build()
 
-    private val removeSpecialCharsRegex = Regex("[^A-Za-z0-9 ]")
+    private val removeSpecialCharsregex = Regex("[^A-Za-z0-9 ]")
 
     private fun dataApiReqBuilder() = baseUrl.toHttpUrl().newBuilder().apply {
         addPathSegment("_next")
@@ -51,20 +50,27 @@ class FlameComics : HttpSource() {
         addPathSegment(buildId)
     }
 
-    private fun imageApiUrlBuilder() = "$cdn/uploads/images/series".toHttpUrl().newBuilder()
+    private fun imageApiUrlBuilder(dataUrl: String) = baseUrl.toHttpUrl().newBuilder().apply {
+        addPathSegment("_next")
+        addPathSegment("image")
+    }.build().toString() + "?url=$dataUrl"
 
-    private fun thumbnailUrl(seriesData: Series) =
-        imageApiUrlBuilder().apply {
+    private fun thumbnailUrl(seriesData: Series) = imageApiUrlBuilder(
+        cdn.toHttpUrl().newBuilder().apply {
+            addPathSegment("series")
             addPathSegment(seriesData.series_id.toString())
             addPathSegment(seriesData.cover)
             addQueryParameter(seriesData.last_edit, null)
-        }.build().toString()
+            addQueryParameter("w", "384")
+            addQueryParameter("q", "75")
+        }.build().toString(),
+    )
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request =
         GET(
             dataApiReqBuilder().apply {
                 addPathSegment("browse.json")
-                fragment("$page&${removeSpecialCharsRegex.replace(query.lowercase(), "")}")
+                fragment("$page&${removeSpecialCharsregex.replace(query.lowercase(), "")}")
             }.build(),
             headers,
         )
@@ -91,13 +97,13 @@ class FlameComics : HttpSource() {
             seriesList.filter { series ->
                 val titles = mutableListOf(series.title)
                 if (series.altTitles != null) {
-                    titles += series.altTitles
+                    titles += json.decodeFromString<List<String>>(series.altTitles)
                 }
                 titles.any { title ->
-                    removeSpecialCharsRegex.replace(
+                    removeSpecialCharsregex.replace(
                         query.lowercase(),
                         "",
-                    ) in removeSpecialCharsRegex.replace(
+                    ) in removeSpecialCharsregex.replace(
                         title.lowercase(),
                         "",
                     )
@@ -133,7 +139,6 @@ class FlameComics : HttpSource() {
     ): MangasPage {
         val searchedSeriesData =
             json.decodeFromString<SearchPageData>(response.body.string()).pageProps.series
-                .filter { series -> series.series_id != null }
 
         val page = if (!response.request.url.fragment?.contains("&")!!) {
             response.request.url.fragment!!.toInt()
@@ -177,18 +182,16 @@ class FlameComics : HttpSource() {
 
     override fun mangaDetailsParse(response: Response): SManga = SManga.create().apply {
         val seriesData =
-            json.decodeFromString<MangaDetailsResponseData>(response.body.string()).pageProps.series
+            json.decodeFromString<MangaPageData>(response.body.string()).pageProps.series
         title = seriesData.title
         thumbnail_url = thumbnailUrl(seriesData)
         description = seriesData.description
-            ?.let { Jsoup.parseBodyFragment(it).wholeText() }
 
         genre = seriesData.tags?.let { tags ->
             (listOf(seriesData.type) + tags).joinToString()
         } ?: seriesData.type
 
-        author = seriesData.author?.joinToString()
-        artist = seriesData.artist?.joinToString()
+        author = seriesData.author
         status = when (seriesData.status.lowercase()) {
             "ongoing" -> SManga.ONGOING
             "dropped" -> SManga.CANCELLED
@@ -199,9 +202,8 @@ class FlameComics : HttpSource() {
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val chaptersListResponseData =
-            json.decodeFromString<ChapterListResponseData>(response.body.string())
-        return chaptersListResponseData.pageProps.chapters.map { chapter ->
+        val mangaPageData = json.decodeFromString<MangaPageData>(response.body.string())
+        return mangaPageData.pageProps.chapters.map { chapter ->
             SChapter.create().apply {
                 setUrlWithoutDomain(
                     baseUrl.toHttpUrl().newBuilder().apply {
@@ -243,15 +245,20 @@ class FlameComics : HttpSource() {
         return chapter.images.mapIndexed { idx, page ->
             Page(
                 idx,
-                imageUrl = imageApiUrlBuilder().apply {
-                    addPathSegment(chapter.series_id.toString())
-                    addPathSegment(chapter.token)
-                    addPathSegment(page.name)
-                    addQueryParameter(
-                        chapter.release_date.toString(),
-                        value = null,
-                    )
-                }.build().toString(),
+                imageUrl = imageApiUrlBuilder(
+                    cdn.toHttpUrl().newBuilder().apply {
+                        addPathSegment("series")
+                        addPathSegment(chapter.series_id.toString())
+                        addPathSegment(chapter.token)
+                        addPathSegment(page.name)
+                        addQueryParameter(
+                            chapter.release_date.toString(),
+                            value = null,
+                        )
+                        addQueryParameter("w", "1920")
+                        addQueryParameter("q", "100")
+                    }.build().toString(),
+                ),
             )
         }
     }

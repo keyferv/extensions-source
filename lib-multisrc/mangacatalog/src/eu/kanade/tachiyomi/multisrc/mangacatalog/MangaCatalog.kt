@@ -96,6 +96,7 @@ abstract class MangaCatalog(
             name = "$name1 - $name2"
         }
         url = element.select(".col-span-4 > a").attr("abs:href")
+        date_upload = System.currentTimeMillis()
     }
 
     // Pages

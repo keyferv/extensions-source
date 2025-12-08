@@ -6,7 +6,7 @@ import java.util.Locale
 
 class Hayalistic : Madara(
     "Hayalistic",
-    "https://hayalistic.net",
+    "https://hayalistic.com.tr",
     "tr",
     dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH),
 )

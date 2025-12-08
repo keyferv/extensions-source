@@ -1,10 +1,7 @@
 ext {
-    extName = "Champion Cross"
-    extClass = ".MangaCross"
-    themePkg = 'comiciviewer'
-    baseUrl = "https://championcross.jp"
-    overrideVersionCode = 5
-    isNsfw = false
+    extName = 'Manga Cross'
+    extClass = '.MangaCross'
+    extVersionCode = 5
 }
 
 apply from: "$rootDir/common.gradle"

@@ -239,10 +239,9 @@ class LectorTmo : ParsedHttpSource(), ConfigurableSource {
             author = it.first()?.attr("title")?.substringAfter(", ")
             artist = it.last()?.attr("title")?.substringAfter(", ")
         }
-        genre = buildList {
-            addAll(document.select("a.py-2").eachText())
-            document.selectFirst("h1.book-type")?.text()?.capitalize()?.also(::add)
-        }.joinToString()
+        genre = document.select("a.py-2").joinToString(", ") {
+            it.text()
+        }
         description = document.select("p.element-description").text()
         status = parseStatus(document.select("span.book-status").text())
         thumbnail_url = document.select(".book-thumbnail").attr("src")
@@ -250,8 +249,6 @@ class LectorTmo : ParsedHttpSource(), ConfigurableSource {
 
     private fun parseStatus(status: String) = when {
         status.contains("Publicándose") -> SManga.ONGOING
-        status.contains("Pausado") -> SManga.ON_HIATUS
-        status.contains("Cancelado") -> SManga.CANCELLED
         status.contains("Finalizado") -> SManga.COMPLETED
         else -> SManga.UNKNOWN
     }

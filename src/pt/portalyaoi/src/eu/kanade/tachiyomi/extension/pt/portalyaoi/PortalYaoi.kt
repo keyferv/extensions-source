@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 
 class PortalYaoi : Madara(
     "Portal Yaoi",
-    "https://lerboyslove.com",
+    "https://portalyaoi.com",
     "pt-BR",
     SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")),
 ) {

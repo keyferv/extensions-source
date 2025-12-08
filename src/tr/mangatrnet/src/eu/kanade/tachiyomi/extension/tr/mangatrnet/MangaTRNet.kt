@@ -4,7 +4,7 @@ import eu.kanade.tachiyomi.multisrc.madara.Madara
 
 class MangaTRNet : Madara(
     "MangaTR.net",
-    "https://mangatr.app",
+    "https://mangatr.net",
     "tr",
 ) {
     override val useLoadMoreRequest = LoadMoreStrategy.Never

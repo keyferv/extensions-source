@@ -14,7 +14,6 @@ import kotlinx.serialization.json.jsonObject
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.injectLazy
@@ -54,11 +53,7 @@ class MantaComics : HttpSource() {
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList) =
         filters.category.ifEmpty { if (query.isEmpty()) "New" else "" }.let {
-            val url = "$baseUrl/manta/v1/search/series".toHttpUrl().newBuilder()
-                .addQueryParameter("cat", it)
-                .addQueryParameter("q", query)
-                .build()
-            GET(url, headers)
+            GET("$baseUrl/manta/v1/search/series?cat=$it&q=$query", headers)
         }
 
     override fun searchMangaParse(response: Response) =

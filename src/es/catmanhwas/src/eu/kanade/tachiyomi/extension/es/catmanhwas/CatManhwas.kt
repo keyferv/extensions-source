@@ -8,9 +8,9 @@ import java.util.Locale
 
 class CatManhwas : Madara(
     "CatManhwas",
-    "https://newcat1.xyz",
+    "https://catmanhwas.com",
     "es",
-    dateFormat = SimpleDateFormat("dd 'de' MMMM 'de' yyyy", Locale("es")),
+    dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale("es")),
 ) {
     override val client: OkHttpClient = super.client.newBuilder()
         .rateLimit(3, 1)

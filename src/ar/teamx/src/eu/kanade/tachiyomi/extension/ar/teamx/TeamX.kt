@@ -180,19 +180,19 @@ class TeamX : ParsedHttpSource(), ConfigurableSource {
 
     private val chapterFormat = SimpleDateFormat("yyyy-MM-dd hh:mm:ss", Locale.getDefault())
 
-    override fun chapterListSelector() = "div.chapter-card a"
+    override fun chapterListSelector() = "div.eplister ul a"
 
     override fun chapterFromElement(element: Element): SChapter {
         return SChapter.create().apply {
-            val chpNum = element.select("div.chapter-info div.chapter-number").text()
-            val chpTitle = element.select("div.chapter-info div.chapter-title").text()
+            val chpNum = element.select("div.epl-num").text()
+            val chpTitle = element.select("div.epl-title").text()
 
             name = when (chpNum.isNullOrBlank()) {
                 true -> chpTitle
                 false -> "$chpNum - $chpTitle"
             }
 
-            date_upload = parseChapterDate(element.select("div.chapter-info div.chapter-date").text())
+            date_upload = parseChapterDate(element.select("div.epl-date").text())
 
             setUrlWithoutDomain(element.attr("href"))
         }
@@ -215,14 +215,9 @@ class TeamX : ParsedHttpSource(), ConfigurableSource {
     // Pages
 
     override fun pageListParse(document: Document): List<Page> {
-        return document.select("div.image_list canvas[data-src], div.image_list img[src]")
-            .mapIndexed { i, element ->
-                val url = when {
-                    element.hasAttr("src") -> element.absUrl("src")
-                    else -> element.absUrl("data-src")
-                }
-                Page(i, "", url)
-            }
+        return document.select("div.image_list img[src]").mapIndexed { i, img ->
+            Page(i, "", img.absUrl("src"))
+        }
     }
 
     override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException()

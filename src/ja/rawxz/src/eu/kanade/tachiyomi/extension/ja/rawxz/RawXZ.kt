@@ -6,10 +6,12 @@ import java.util.Locale
 
 class RawXZ : Madara(
     "RawXZ",
-    "https://rawxjp.com",
+    "https://rawxz.to",
     "ja",
     dateFormat = SimpleDateFormat("M月 d, yyyy", Locale.ROOT),
 ) {
     override val useLoadMoreRequest = LoadMoreStrategy.Never
     override val useNewChapterEndpoint = false
+
+    override val mangaSubString = "jp-manga"
 }

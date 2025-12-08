@@ -1,8 +1,7 @@
 ext {
     extName = 'Desu'
     extClass = '.Desu'
-    extVersionCode = 29
-    isNsfw = true
+    extVersionCode = 27
 }
 
 apply from: "$rootDir/common.gradle"

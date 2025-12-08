@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.vi.truyentranh3q
 
+import android.net.ParseException
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Filter
@@ -9,7 +10,6 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.tryParse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -27,7 +27,7 @@ import java.util.Locale
 class TruyenTranh3Q : ParsedHttpSource() {
     override val name: String = "TruyenTranh3Q"
     override val lang: String = "vi"
-    override val baseUrl: String = "https://truyentranh3qc.com"
+    override val baseUrl: String = "https://truyentranh3q.com"
     override val supportsLatest: Boolean = true
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
@@ -74,14 +74,15 @@ class TruyenTranh3Q : ParsedHttpSource() {
     override fun latestUpdatesNextPageSelector(): String? = popularMangaNextPageSelector()
 
     // search
-    private val searchUrl = "$baseUrl/tim-kiem-nang-cao"
+    private val searchPath = "tim-kiem-nang-cao"
+    private val queryParam = "keyword"
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = searchUrl.toHttpUrl().newBuilder()
+        val url = "$baseUrl/$searchPath".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
 
         // always add search query if present
         if (query.isNotBlank()) {
-            url.addQueryParameter("keyword", query)
+            url.addQueryParameter(queryParam, query)
         }
 
         // process filters regardless of search query
@@ -123,64 +124,62 @@ class TruyenTranh3Q : ParsedHttpSource() {
     override fun mangaDetailsParse(document: Document): SManga {
         return SManga.create().apply {
             document.selectFirst(".book_info > .book_other")?.let { info ->
-                title = info.select("h1[itemprop=name]").text()
+                title = info.selectFirst("h1[itemprop=name]")!!.text()
                 author = info.selectFirst("ul.list-info li.author p.col-xs-9")?.text()
-                status = parseStatus(info.selectFirst("ul.list-info li.status p.col-xs-9")?.text())
+                status = when (info.selectFirst("ul.list-info li.status p.col-xs-9")?.text()) {
+                    "Đang Cập Nhật" -> SManga.ONGOING
+                    "Hoàn Thành" -> SManga.COMPLETED
+                    else -> SManga.UNKNOWN
+                }
                 genre = info.select(".list01 li a").joinToString { it.text() }
             }
-            description = document.select(".book_detail > .story-detail-info").joinToString { it.wholeText() }
-            thumbnail_url = document.selectFirst(".book_detail > .book_info > .book_avatar > img")?.absUrl("abs:src")
-        }
-    }
-
-    private fun parseStatus(status: String?): Int {
-        val ongoingStatus = listOf("Đang Cập Nhật", "Đang Tiến Hành")
-        val completedStatus = listOf("Hoàn Thành", "Đã Hoàn Thành")
-        return when {
-            status == null -> SManga.UNKNOWN
-            ongoingStatus.any { status.contains(it, ignoreCase = true) } -> SManga.ONGOING
-            completedStatus.any { status.contains(it, ignoreCase = true) } -> SManga.COMPLETED
-            else -> SManga.UNKNOWN
+            description = document.selectFirst(".book_detail > .story-detail-info")?.text()
+            thumbnail_url = document.selectFirst(".book_detail > .book_info > .book_avatar > img")?.attr("abs:src")
         }
     }
 
     // chapters
     override fun chapterListSelector(): String = ".works-chapter-list .works-chapter-item"
-    private fun parseRelativeDate(dateString: String): Long {
-        val number = Regex("""(\d+)""").find(dateString)?.value?.toIntOrNull() ?: return 0
-        val cal = Calendar.getInstance()
 
-        return when {
-            listOf("giây", "giây trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.SECOND, -number); cal.timeInMillis
-            }
-            listOf("phút", "phút trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.MINUTE, -number); cal.timeInMillis
-            }
-            listOf("giờ", "giờ trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.HOUR, -number); cal.timeInMillis
-            }
-            listOf("ngày", "ngày trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.DAY_OF_YEAR, -number); cal.timeInMillis
-            }
-            listOf("tuần", "tuần trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.WEEK_OF_YEAR, -number); cal.timeInMillis
-            }
-            listOf("tháng", "tháng trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.MONTH, -number); cal.timeInMillis
-            }
-            listOf("năm", "năm trước").any { dateString.contains(it, ignoreCase = true) } -> {
-                cal.add(Calendar.YEAR, -number); cal.timeInMillis
-            }
-            else -> 0
-        }
+    private fun parseRelativeDate(dateString: String): Long {
+        val now = Calendar.getInstance()
+
+        val timeUnits = mapOf(
+            "giây" to Calendar.SECOND,
+            "phút" to Calendar.MINUTE,
+            "giờ" to Calendar.HOUR,
+            "ngày" to Calendar.DAY_OF_YEAR,
+            "tuần" to Calendar.WEEK_OF_YEAR,
+            "tháng" to Calendar.MONTH,
+            "năm" to Calendar.YEAR,
+        )
+
+        // extract the number and time unit from the string
+        val parts = dateString.replace(" trước", "").split(" ")
+        if (parts.size < 2) return 0L
+
+        val number = parts[0].toIntOrNull() ?: return 0L
+        val unit = parts[1]
+
+        // find the matching time unit
+        val calendarUnit = timeUnits.entries.find { (key, _) -> unit.startsWith(key) }?.value ?: return 0L
+
+        // subtract the time
+        now.add(calendarUnit, -number)
+
+        return now.timeInMillis
     }
 
     private fun parseChapterDate(dateString: String): Long {
-        val listCal = listOf("giây", "phút", "giờ", "ngày", "tuần", "tháng", "năm", "trước")
-        return when {
-            listCal.any { dateString.contains(it, ignoreCase = true) } -> parseRelativeDate(dateString)
-            else -> dateFormat.tryParse(dateString)
+        val relativeTime = parseRelativeDate(dateString)
+        return if (relativeTime != 0L) {
+            relativeTime
+        } else {
+            try {
+                dateFormat.parse(dateString)?.time ?: 0L
+            } catch (e: ParseException) {
+                0L
+            }
         }
     }
 
@@ -206,10 +205,10 @@ class TruyenTranh3Q : ParsedHttpSource() {
     override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException()
 
     // filters
-    class SortFilter(name: String, options: List<String>) : Filter.Select<String>(name, options.toTypedArray())
-    class StatusFilter(name: String, options: List<String>) : Filter.Select<String>(name, options.toTypedArray())
-    class CountryFilter(name: String, options: List<String>, val countryValues: List<String>) : Filter.Select<String>(name, options.toTypedArray())
-    class MinChapterFilter(name: String, options: List<String>, val chapterValues: List<Int>) : Filter.Select<String>(name, options.toTypedArray())
+    class SortFilter(name: String, val options: List<String>) : Filter.Select<String>(name, options.toTypedArray())
+    class StatusFilter(name: String, val options: List<String>) : Filter.Select<String>(name, options.toTypedArray())
+    class CountryFilter(name: String, val options: List<String>, val countryValues: List<String>) : Filter.Select<String>(name, options.toTypedArray())
+    class MinChapterFilter(name: String, val options: List<String>, val chapterValues: List<Int>) : Filter.Select<String>(name, options.toTypedArray())
     class Genre(name: String, val id: Int) : Filter.TriState(name)
     class GenreFilter(name: String, state: List<Genre>) : Filter.Group<Genre>(name, state)
 
@@ -247,7 +246,7 @@ class TruyenTranh3Q : ParsedHttpSource() {
     private var genreList: List<Genre> = emptyList()
     private var fetchGenreAttempts: Int = 0
 
-    private fun genresRequest() = GET(searchUrl, headers)
+    private fun genresRequest() = GET("$baseUrl/$searchPath", headers)
 
     private fun parseGenres(document: Document): List<Genre> {
         return document.select(".genre-item").mapIndexed { index, element ->

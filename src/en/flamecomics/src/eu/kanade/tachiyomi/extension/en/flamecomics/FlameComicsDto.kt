@@ -14,31 +14,13 @@ class NewBuildID(
 )
 
 @Serializable
-class MangaDetailsResponseData(
-    val pageProps: PageProps,
-) {
-    @Serializable
-    class PageProps(
-        val series: Series,
-    )
-}
-
-@Serializable
-class ChapterListResponseData(
+class MangaPageData(
     val pageProps: PageProps,
 ) {
     @Serializable
     class PageProps(
         val chapters: List<Chapter>,
-    )
-
-    @Serializable
-    data class Chapter(
-        val chapter: Double,
-        val title: String?,
-        val release_date: Long,
-        val series_id: Int,
-        val token: String,
+        val series: Series,
     )
 }
 
@@ -78,33 +60,34 @@ class ChapterPageData(
 ) {
     @Serializable
     class PageProps(
-        val chapter: ChapterPage,
-    )
-
-    @Serializable
-    data class ChapterPage(
-        val release_date: Long,
-        val series_id: Int,
-        val token: String,
-        @Serializable(with = KeysToListSerializer::class)
-        val images: List<Page>,
+        val chapter: Chapter,
     )
 }
 
 @Serializable
 class Series(
     val title: String,
-    val altTitles: List<String>?,
-    val description: String?,
+    val altTitles: String?,
+    val description: String,
     val cover: String,
     val type: String,
     val tags: List<String>?,
-    val author: List<String>?,
-    val artist: List<String>?,
+    val author: String?,
     val status: String,
-    val series_id: Int?,
+    val series_id: Int,
     val last_edit: String,
     val views: Int?,
+)
+
+@Serializable
+class Chapter(
+    val chapter: Double,
+    val title: String?,
+    val release_date: Long,
+    val series_id: Int,
+    val token: String,
+    @Serializable(with = KeysToListSerializer::class)
+    val images: List<Page>,
 )
 
 @Serializable

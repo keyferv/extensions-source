@@ -3,7 +3,7 @@ ext {
     extClass = '.TheBlank'
     themePkg = 'madara'
     baseUrl = 'https://theblank.net'
-    overrideVersionCode = 4
+    overrideVersionCode = 3
     isNsfw = true
 }
 

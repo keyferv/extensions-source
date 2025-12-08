@@ -8,7 +8,7 @@ import java.util.Locale
 
 class LaviniaFansub : Madara(
     "Lavinia Fansub",
-    "https://laviniafansub.site",
+    "https://laviniafansub.com",
     "tr",
     dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ROOT),
 ) {

@@ -1,70 +1,42 @@
 package eu.kanade.tachiyomi.multisrc.mangahub
 
-class GraphQLTag(
-    val refreshUrl: String? = null,
+import kotlinx.serialization.Serializable
+
+private fun buildQuery(queryAction: () -> String) = queryAction().replace("%", "$")
+
+val PAGES_QUERY = buildQuery {
+    """
+            query(%mangaSource: MangaSource, %slug: String!, %number: Float!) {
+                chapter(x: %mangaSource, slug: %slug, number: %number) {
+                    pages
+                }
+            }
+    """.trimIndent()
+}
+
+@Serializable
+data class ApiErrorMessages(
+    val message: String,
 )
 
-val searchQuery = { mangaSource: String, query: String, genre: String, order: String, page: Int ->
-    """
-        {
-            search(x: $mangaSource, q: "$query", genre: "$genre", mod: $order, offset: ${(page - 1) * 30}) {
-                rows {
-                    title,
-                    author,
-                    slug,
-                    image,
-                    genres,
-                    latestChapter
-                }
-            }
-        }
-    """.trimIndent()
-}
+@Serializable
+data class ApiChapterPagesResponse(
+    val data: ApiChapterData?,
+    val errors: List<ApiErrorMessages>?,
+)
 
-val mangaDetailsQuery = { mangaSource: String, slug: String ->
-    """
-        {
-            manga(x: $mangaSource, slug: "$slug") {
-                    title,
-                    slug,
-                    status,
-                    image,
-                    author,
-                    artist,
-                    genres,
-                    description,
-                    alternativeTitle
-            }
-        }
-    """.trimIndent()
-}
+@Serializable
+data class ApiChapterData(
+    val chapter: ApiChapter?,
+)
 
-val mangaChapterListQuery = { mangaSource: String, slug: String ->
-    """
-        {
-            manga(x: $mangaSource, slug: "$slug") {
-                    slug,
-                    chapters {
-                        number,
-                        title,
-                        date
-                    }
-            }
-        }
-    """.trimIndent()
-}
+@Serializable
+data class ApiChapter(
+    val pages: String,
+)
 
-val pagesQuery = { mangaSource: String, slug: String, number: Float ->
-    """
-        {
-            chapter(x: $mangaSource, slug: "$slug", number: $number) {
-                    pages,
-                    mangaID,
-                    number,
-                    manga {
-                        slug
-                    }
-                }
-        }
-    """.trimIndent()
-}
+@Serializable
+data class ApiChapterPages(
+    val p: String,
+    val i: List<String>,
+)

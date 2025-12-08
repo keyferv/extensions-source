@@ -1,7 +1,9 @@
 ext {
     extName = 'Fênix Manhwas'
     extClass = '.FenixManhwas'
-    extVersionCode = 45
+    themePkg = 'madara'
+    baseUrl = 'https://fenixscan.xyz'
+    overrideVersionCode = 2
     isNsfw = false
 }
 

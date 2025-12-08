@@ -7,7 +7,7 @@ import okhttp3.Cookie
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.asResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
 
 class Komiktap : MangaThemesia("Komiktap", "https://komiktap.info", "id") {
@@ -23,8 +23,9 @@ class Komiktap : MangaThemesia("Komiktap", "https://komiktap.info", "id") {
                 }
                 // Fix image content type
                 val type = IMG_CONTENT_TYPE.toMediaType()
-                val body = response.body.source().asResponseBody(type)
-                return@addInterceptor response.newBuilder().body(body).build()
+                val body = response.body.bytes().toResponseBody(type)
+                return@addInterceptor response.newBuilder().body(body)
+                    .header("Content-Type", IMG_CONTENT_TYPE).build()
             }
             response
         }

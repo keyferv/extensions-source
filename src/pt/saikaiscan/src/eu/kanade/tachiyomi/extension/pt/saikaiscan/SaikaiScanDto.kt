@@ -40,7 +40,7 @@ data class SaikaiScanStoryDto(
     val title: String,
 ) {
 
-    fun toSManga(storageUrl: String): SManga = SManga.create().apply {
+    fun toSManga(): SManga = SManga.create().apply {
         title = this@SaikaiScanStoryDto.title
         author = authors.joinToString { it.name }
         artist = artists.joinToString { it.name }
@@ -53,7 +53,7 @@ data class SaikaiScanStoryDto(
         description = Jsoup.parseBodyFragment(synopsis)
             .select("p")
             .joinToString("\n\n") { it.text() }
-        thumbnail_url = "$storageUrl/$image"
+        thumbnail_url = "${SaikaiScan.IMAGE_SERVER_URL}/$image"
         url = "/comics/$slug"
     }
 }

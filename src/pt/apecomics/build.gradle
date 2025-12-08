@@ -1,9 +1,9 @@
 ext {
     extName = 'ApeComics'
     extClass = '.ApeComics'
-    themePkg = 'mangathemesia'
+    themePkg = 'madara'
     baseUrl = 'https://apecomics.net'
-    overrideVersionCode = 13
+    overrideVersionCode = 0
     isNsfw = false
 }
 
