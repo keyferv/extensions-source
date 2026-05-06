@@ -1,80 +1,97 @@
 package eu.kanade.tachiyomi.extension.es.barmanga
 
+import android.util.Base64
 import eu.kanade.tachiyomi.multisrc.madara.Madara
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.Page
-import keiyoushi.utils.parseAs
-import keiyoushi.utils.toJsonString
-import kotlinx.serialization.Serializable
-import okhttp3.MultipartBody
-import okhttp3.Request
 import org.jsoup.nodes.Document
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class BarManga :
-    Madara(
-        "BarManga",
-        "https://archiviumbar.com",
-        "es",
-        SimpleDateFormat("dd/MM/yyyy", Locale.ROOT),
-    ) {
-
+class BarManga : Madara(
+    "BarManga",
+    "https://libribar.com",
+    "es",
+    SimpleDateFormat("dd/MM/yyyy", Locale.ROOT),
+) {
     override val useLoadMoreRequest = LoadMoreStrategy.Never
 
-    override fun popularMangaSelector() = "#loop-content .mp-card"
+    override val mangaDetailsSelectorDescription = "div.flamesummary > div.manga-excerpt"
 
-    override val popularMangaUrlSelector = ".mp-card-title > a"
+    override val pageListParseSelector = "div.page-break"
 
-    override val mangaDetailsSelectorTitle = ".breadcrumb > li:last-child > a"
+    private val imageSegmentsRegex = """var\s+imageSegments\s*=\s*\[\s*(['"][A-Za-z0-9+/=]+['"](?:\s*,\s*['"][A-Za-z0-9+/=]+['"])*)\s*];""".toRegex()
+    private val base64ItemRegex = """['"]([A-Za-z0-9+/=]+)['"]""".toRegex()
 
     override fun pageListParse(document: Document): List<Page> {
         launchIO { countViews(document) }
-        val script = document.selectFirst(".manga-reader-container + script")!!.data()
-        val tokens = PAGE_TOKENS_REGEX.find(script)?.groupValues?.last()?.parseAs<Map<String, String>>() ?: return emptyList()
-        val nonce = NONCE_REGEX.find(script)?.groupValues?.last() ?: return emptyList()
-        val action = ACTION_REGEX.find(script)?.groupValues?.last() ?: return emptyList()
-        val chapterKey = CHAPTER_KEY_REGEX.find(script)?.groupValues?.last() ?: return emptyList()
-        return tokens
-            .map { (page, token) -> PageDto(nonce, token, page, action, chapterKey) }
-            .mapIndexed { index, dto ->
-                Page(index, document.location(), dto.toJsonString())
+
+        val pages = mutableListOf<Page>()
+        val seenUrls = mutableSetOf<String>()
+
+        // Primero procesar los bloques con `imageSegments` dentro de los `page-break`
+        document.select(pageListParseSelector).forEach { element ->
+            val scriptData = element.select("script").firstNotNullOfOrNull { script ->
+                val data = script.data()
+                if (data.contains("var imageSegments")) data else null
+            } ?: return@forEach
+
+            val match = imageSegmentsRegex.find(scriptData) ?: return@forEach
+            val arrayContent = match.groupValues[1]
+
+            val segments = base64ItemRegex.findAll(arrayContent).map { it.groupValues[1] }.toList()
+            if (segments.isEmpty()) return@forEach
+
+            val joinedBase64 = segments.joinToString("")
+            val imageUrl = String(Base64.decode(joinedBase64, Base64.DEFAULT))
+
+            if (seenUrls.add(imageUrl)) {
+                pages.add(Page(pages.size, document.location(), imageUrl))
             }
-    }
+        }
 
-    override fun imageRequest(page: Page): Request {
-        val dto = page.imageUrl!!.parseAs<PageDto>()
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("action", dto.action)
-            .addFormDataPart("token", dto.token)
-            .addFormDataPart("page", dto.page)
-            .addFormDataPart("nonce", dto.nonce)
-            .addFormDataPart("chapter_key", dto.chapterKey)
-            .build()
+        // Luego, añadir imágenes estáticas que estén dentro de `div.reading-content` pero fuera de `page-break`
+        document.select("div.reading-content img").forEach { img ->
+            // Si la imagen está dentro de un `page-break`, ya fue procesada arriba
+            if (img.closest(pageListParseSelector) != null) return@forEach
 
-        val imageHeaders = headers.newBuilder()
-            .set("Accept", "*/*")
-            .set("X-Requested-With", "XMLHttpRequest")
-            .set("Referer", page.url)
-            .build()
-        return POST("$baseUrl/wp-admin/admin-ajax.php", imageHeaders, body)
-    }
+            // Buscar en varios atributos comunes (data-src, data-original, srcset, etc.)
+            val possibleAttrs = listOf("data-src", "data-lazy-src", "data-original", "data-src", "src", "srcset", "data-srcset")
+            var raw = ""
+            for (attr in possibleAttrs) {
+                val v = img.attr(attr).orEmpty().trim()
+                if (v.isNotEmpty()) {
+                    raw = v
+                    break
+                }
+            }
 
-    @Serializable
-    class PageDto(
-        val nonce: String,
-        val token: String,
-        val page: String,
-        val action: String,
-        // Default value is needed for backward compatibility with cached pages to prevent MissingFieldException
-        val chapterKey: String = "",
-    )
+            if (raw.isBlank()) return@forEach
 
-    companion object {
-        private val PAGE_TOKENS_REGEX = """(?:_tokens\s+?=\s+?)([^;]+)""".toRegex()
-        private val NONCE_REGEX = """nonce:\s+?"([^"]+)""".toRegex()
-        private val ACTION_REGEX = """action:\s+?"([^"]+)""".toRegex()
-        private val CHAPTER_KEY_REGEX = """chapterKey:\s+?"([^"]+)""".toRegex()
+            // Si es un srcset, tomar la primera URL antes del espacio o coma
+            if (raw.contains(",") || raw.contains(" ")) {
+                raw = raw.split(",").first().trim().split(Regex("\\s+"))[0]
+            }
+
+            // Resolver URLs relativas y protocol-relative
+            val src = try {
+                when {
+                    raw.startsWith("http://") || raw.startsWith("https://") -> raw
+                    raw.startsWith("//") -> "https:$raw"
+                    else -> URL(URL(document.location()), raw).toString()
+                }
+            } catch (_: Exception) {
+                raw
+            }
+
+            if (src.isBlank()) return@forEach
+            if (src.startsWith("blob:") || src.startsWith("data:")) return@forEach
+
+            if (seenUrls.add(src)) {
+                pages.add(Page(pages.size, document.location(), src))
+            }
+        }
+
+        return pages
     }
 }
