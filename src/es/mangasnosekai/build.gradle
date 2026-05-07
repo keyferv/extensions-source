@@ -3,7 +3,7 @@ ext {
     extClass = '.MangasNoSekai'
     themePkg = 'madara'
     baseUrl = 'https://mangasnosekai.com'
-    overrideVersionCode = 17
+    overrideVersionCode = 19
     isNsfw = false
 }
 
@@ -11,4 +11,17 @@ apply from: "$rootDir/common.gradle"
 
 dependencies {
     implementation(project(":lib:synchrony"))
+    testImplementation(project(":core"))
+    testImplementation(libs.jsoup)
+    testImplementation(libs.kotlin.json)
+    testImplementation("junit:junit:4.13.2")
+}
+
+android {
+    sourceSets {
+        test {
+            java.srcDirs = ['test']
+            kotlin.srcDirs = ['test']
+        }
+    }
 }

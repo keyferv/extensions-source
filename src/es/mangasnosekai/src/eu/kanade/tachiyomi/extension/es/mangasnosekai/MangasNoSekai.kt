@@ -13,7 +13,6 @@ import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
@@ -145,26 +144,52 @@ class MangasNoSekai :
             .add("page", page.toString())
 
         objects.forEach { (key, value) ->
-            form.add(key, value)
+            // Skip keys already set explicitly — the script's defaults would
+            // override our values on servers that read the first occurrence.
+            if (key !in listOf("page", "mangaid")) {
+                form.add(key, value)
+            }
         }
 
         return POST(baseUrl + url, xhrHeaders, form.build())
     }
 
-    private val altChapterListSelector = "body > div > div"
+    private val altChapterListSelector = "div.contenedor-capitulo-miniatura"
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
         launchIO { countViews(document) }
 
         val mangaSlug = response.request.url.toString().substringAfter(baseUrl).removeSuffix("/")
-        val coreScript = document.selectFirst("script#wp-manga-js")!!.attr("abs:src")
+
+        // Intentar obtener capítulos vía AJAX/JSON (ruta principal — la que usa el sitio real)
+        val ajaxChapters = tryFetchAjaxChapters(document, mangaSlug)
+        if (ajaxChapters != null) return ajaxChapters
+
+        // Fallback: capítulos renderizados directamente en el HTML
+        val directChapters = document.select(altChapterListSelector)
+        if (directChapters.isNotEmpty()) {
+            return directChapters.map(::altChapterFromElement)
+        }
+
+        throw Exception("No se pudieron obtener los capítulos")
+    }
+
+    /**
+     * Intenta obtener capítulos vía el endpoint AJAX/JSON del sitio.
+     * Este es el método que usa el sitio real para cargar TODOS los capítulos paginados.
+     */
+    private fun tryFetchAjaxChapters(document: Document, mangaSlug: String): List<SChapter>? {
+        val coreScript = document.selectFirst("script#wp-manga-js")?.attr("abs:src")
+            ?: return null
+
         val coreScriptBody = Deobfuscator.deobfuscateScript(client.newCall(GET(coreScript, headers)).execute().body.string())
-            ?: throw Exception("No se pudo deobfuscar el script")
+            ?: return null
 
         val regexCapture = ACTION_REGEX.find(coreScriptBody)?.groupValues
-        val url = regexCapture?.get(1) ?: throw Exception("No se pudo obtener la url del capítulo")
-        val data = regexCapture.getOrNull(2)?.trim() ?: throw Exception("No se pudo obtener la data del capítulo")
+            ?: return null
+        val url = regexCapture.getOrNull(1) ?: return null
+        val data = regexCapture.getOrNull(2)?.trim() ?: return null
 
         val objects = OBJECTS_REGEX.findAll(data)
             .mapNotNull { matchResult ->
@@ -177,45 +202,82 @@ class MangasNoSekai :
             ?.let { MANGA_ID_REGEX.find(it)?.groupValues?.get(1) }
             ?: document.selectFirst("script#manga_disqus_embed-js-extra")?.data()
                 ?.let { ALT_MANGA_ID_REGEX.find(it)?.groupValues?.get(1) }
-            ?: throw Exception("No se pudo obtener el id del manga")
+            ?: return null
 
-        val chapterElements = mutableListOf<Element>()
-        var page = 1
-        do {
-            val xhrRequest = altChapterRequest(url, mangaId, page, objects)
-            val xhrResponse = client.newCall(xhrRequest).execute()
-            if (!xhrResponse.isSuccessful) {
-                throw Exception("HTTP ${xhrResponse.code}: Intente iniciar sesión en WebView")
-            }
-            val xhrBody = xhrResponse.body.string()
-            if (xhrBody.startsWith("{")) {
-                return chaptersFromJson(xhrBody, mangaSlug)
-            }
-            val xhrDocument = Jsoup.parse(xhrBody)
-            chapterElements.addAll(xhrDocument.select(altChapterListSelector))
-            page++
-        } while (xhrDocument.select(altChapterListSelector).isNotEmpty())
+        // Página 1
+        val firstRequest = altChapterRequest(url, mangaId, 1, objects)
+        val firstResponse = client.newCall(firstRequest).execute()
+        if (!firstResponse.isSuccessful) return null
+        val firstBody = firstResponse.body.string()
 
-        return chapterElements.map(::altChapterFromElement)
+        if (!firstBody.startsWith("{")) return null
+
+        // Formato paginado nuevo (getcaps7)
+        val paginatedResult = try {
+            json.decodeFromString<ChapterListResponse>(firstBody)
+        } catch (_: Exception) {
+            null
+        }
+
+        if (paginatedResult != null && paginatedResult.chaptersToDisplay.isNotEmpty()) {
+            val allChapters = paginatedResult.chaptersToDisplay.map { it.toSChapter() }.toMutableList()
+
+            // Fetchear TODAS las páginas restantes
+            for (p in 2..paginatedResult.totalPages) {
+                val nextRequest = altChapterRequest(url, mangaId, p, objects)
+                val nextResponse = client.newCall(nextRequest).execute()
+                if (!nextResponse.isSuccessful) break
+                val nextBody = nextResponse.body.string()
+                val nextResult = try {
+                    json.decodeFromString<ChapterListResponse>(nextBody)
+                } catch (_: Exception) {
+                    null
+                }
+                val nextChapters = nextResult?.chaptersToDisplay
+                    ?.map { it.toSChapter() }
+                    ?: break
+                allChapters.addAll(nextChapters)
+            }
+            return allChapters
+        }
+
+        // Fallback: formato JSON antiguo (PayloadDto)
+        return chaptersFromJson(firstBody, mangaSlug)
     }
 
     private fun altChapterFromElement(element: Element) = SChapter.create().apply {
         setUrlWithoutDomain(element.selectFirst("a")!!.attr("abs:href"))
-        name = element.select("div.text-sm").text()
+        name = element.selectFirst("div.text-sm")?.text()?.trim() ?: ""
         date_upload = element.selectFirst("time")?.text()?.let {
             parseChapterDate(it)
         } ?: 0
     }
 
-    private fun chaptersFromJson(jsonString: String, mangaSlug: String): List<SChapter> {
-        val result = json.decodeFromString<PayloadDto>(jsonString)
-        return result.manga.first().chapters.map { it.toSChapter(mangaSlug) }
+    private fun chaptersFromJson(jsonString: String, mangaSlug: String): List<SChapter>? {
+        return try {
+            val result = json.decodeFromString<PayloadDto>(jsonString)
+            if (result.manga.isEmpty()) return null
+            result.manga.first().chapters.map { it.toSChapter(mangaSlug) }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     companion object {
-        val ACTION_REGEX = """function\s+.*?[\s\S]*?\.ajax;?[\s\S]*?(?:'?url'?:\s*'([^']*)')(?:[\s\S]*?'?data'?:\s*\{([^}]*)\})?""".toRegex()
-        val OBJECTS_REGEX = """\s*'?(\w+)'?\s*:\s*(?:(?:'([^']*)'|([^,\r\n]+))\s*,?\s*)""".toRegex()
-        val MANGA_ID_REGEX = """\"manga_id"\s*:\s*"(.*)\"""".toRegex()
-        val ALT_MANGA_ID_REGEX = """\"postId"\s*:\s*"(.*)\"""".toRegex()
+        val ACTION_REGEX = MangasNoSekaiPatterns.ACTION_REGEX
+        val OBJECTS_REGEX = MangasNoSekaiPatterns.OBJECTS_REGEX
+        val MANGA_ID_REGEX = MangasNoSekaiPatterns.MANGA_ID_REGEX
+        val ALT_MANGA_ID_REGEX = MangasNoSekaiPatterns.ALT_MANGA_ID_REGEX
     }
+}
+
+/**
+ * Pure Kotlin object holding regex patterns. Extracted for testability
+ * without requiring Android dependencies.
+ */
+object MangasNoSekaiPatterns {
+    val ACTION_REGEX = """function\s+.*?[\s\S]*?\.ajax;?[\s\S]*?(?:'?url'?:\s*'([^']*)')(?:[\s\S]*?'?data'?:\s*\{([^}]*)\})?""".toRegex()
+    val OBJECTS_REGEX = """\s*'?(\w+)'?\s*:\s*(?:(?:'([^']*)'|([^,\r\n]+))\s*,?\s*)""".toRegex()
+    val MANGA_ID_REGEX = """"manga_id"\s*:\s*"([^"]+)"""".toRegex()
+    val ALT_MANGA_ID_REGEX = """"postId"\s*:\s*"([^"]+)"""".toRegex()
 }
