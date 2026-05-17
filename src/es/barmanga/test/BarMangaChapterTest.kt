@@ -18,7 +18,7 @@ class BarMangaChapterTest {
     fun testChapterExtraction() {
         println("\n=== TEST DE EXTRACCIÓN DE CAPÍTULOS ===\n")
 
-        val mangaUrl = "https://libribar.com/manga/la-leyenda-de-la-estrella-general/"
+        val mangaUrl = "https://archiviumbar.com/manga/callate-malvado-dragon-ya-no-quiero-criar-hijos-contigo/"
 
         println("Conectando a: $mangaUrl")
 
@@ -40,8 +40,8 @@ class BarMangaChapterTest {
         val firstChapter = chapterElements.first()
         println("\n--- PRIMER CAPÍTULO ---")
 
-        val link = firstChapter.selectFirst("span.chapter-link-container a")
-        assert(link != null) { "❌ No se encontró enlace con selector 'span.chapter-link-container a'" }
+        val link = firstChapter.selectFirst("a.ch-link")
+        assert(link != null) { "❌ No se encontró enlace con selector 'a.ch-link'" }
 
         println("✓ Enlace encontrado:")
         println("  - href: ${link!!.attr("href")}")
@@ -52,8 +52,7 @@ class BarMangaChapterTest {
         var successCount = 0
 
         chapterElements.forEach { element ->
-            val chapterLink = element.selectFirst("span.chapter-link-container a")
-                ?: element.select("a").firstOrNull { !it.hasClass("c-new-tag") }
+            val chapterLink = element.selectFirst("a.ch-link")
 
             if (chapterLink != null && chapterLink.attr("href").isNotEmpty()) {
                 successCount++
@@ -70,4 +69,3 @@ class BarMangaChapterTest {
         println("\n✅ TEST EXITOSO: Todos los capítulos extraídos correctamente\n")
     }
 }
-
