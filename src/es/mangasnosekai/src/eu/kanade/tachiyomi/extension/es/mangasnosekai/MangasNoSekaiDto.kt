@@ -55,20 +55,20 @@ data class ChapterDisplayItem(
     val date: String = "",
 ) {
     fun toSChapter() = SChapter.create().apply {
-        val displayName = name.trim()
-        val extend = nameExtend.trim()
+        val displayName = this@ChapterDisplayItem.name.trim()
+        val extend = this@ChapterDisplayItem.nameExtend.trim()
         name = if (extend.isNotEmpty()) "$displayName $extend" else displayName
 
         url = try {
-            java.net.URI(link.trim()).path
+            java.net.URI(this@ChapterDisplayItem.link.trim()).path
         } catch (_: Exception) {
-            link.trim()
+            this@ChapterDisplayItem.link.trim()
         }
 
-        chapter_number = number.toFloatOrNull() ?: 0f
+        chapter_number = this@ChapterDisplayItem.number.toFloatOrNull() ?: 0f
 
         date_upload = try {
-            val cleanDate = date.replace(Regex("<[^>]*>"), "").trim()
+            val cleanDate = this@ChapterDisplayItem.date.replace(Regex("<[^>]*>"), "").trim()
             chapterDisplayDateFormat.parse(cleanDate)?.time ?: 0
         } catch (_: Exception) {
             0

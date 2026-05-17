@@ -3,7 +3,7 @@ ext {
     extClass = '.JeazScans'
     themePkg = 'madara'
     baseUrl = 'https://lectorhub.j5z.xyz'
-    overrideVersionCode = 18
+    overrideVersionCode = 20
     isNsfw = false
 }
 

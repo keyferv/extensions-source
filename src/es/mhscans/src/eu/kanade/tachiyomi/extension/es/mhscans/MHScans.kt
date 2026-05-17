@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
 class MHScans :
     Madara(
         "MHScans",
-        "https://curiosidadtop.com/",
+        "https://mhscans.com",
         "es",
         dateFormat = SimpleDateFormat("dd 'de' MMMM 'de' yyyy", Locale("es")),
     ),
@@ -30,7 +30,7 @@ class MHScans :
     override val useNewChapterEndpoint = true
     override val useLoadMoreRequest = LoadMoreStrategy.Always
 
-    private val defaultBaseUrl = "https://curiosidadtop.com/"
+    private val defaultBaseUrl = "https://mhscans.com"
     private val preferences: SharedPreferences by lazy {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
     }

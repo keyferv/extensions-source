@@ -44,11 +44,16 @@ class MangasNoSekaiTest {
         val match = MangasNoSekaiPatterns.ACTION_REGEX.find(scriptContents)
         assert(match != null) { "ACTION_REGEX no encontró coincidencia en script válido" }
 
-        val url = match!!.groupValues[1]
+        // URL can be in group 1 (double quotes), 2 (single quotes), 3 (backticks), or 4 (unquoted)
+        val url = match!!.groupValues[2].takeIf { it.isNotEmpty() }
+            ?: match.groupValues[1].takeIf { it.isNotEmpty() }
+            ?: match.groupValues[3].takeIf { it.isNotEmpty() }
+            ?: match.groupValues[4]
         assert(url.isNotBlank()) { "URL extraída está en blanco" }
         assert(url.contains("admin-ajax.php")) { "URL no contiene la ruta esperada" }
 
-        val data = match.groupValues.getOrNull(2)
+        // Data is in group 5
+        val data = match.groupValues.getOrNull(5)
         assert(data != null && data.isNotBlank()) { "Data no extraída del script" }
     }
 
@@ -83,7 +88,10 @@ class MangasNoSekaiTest {
         val validPairs = MangasNoSekaiPatterns.OBJECTS_REGEX.findAll(dataBlock)
             .mapNotNull { match ->
                 val key = match.groupValues[1]
-                val value = match.groupValues.getOrNull(2)
+                // Value can be in group 2 (double quotes), 3 (single quotes), or 4 (unquoted)
+                val value = match.groupValues.getOrNull(2).takeIf { !it.isNullOrEmpty() }
+                    ?: match.groupValues.getOrNull(3).takeIf { !it.isNullOrEmpty() }
+                    ?: match.groupValues.getOrNull(4).takeIf { !it.isNullOrEmpty() }
                 if (!value.isNullOrEmpty()) key to value else null
             }
             .toList()
@@ -104,6 +112,68 @@ class MangasNoSekaiTest {
         val altMatch = MangasNoSekaiPatterns.ALT_MANGA_ID_REGEX.find(scriptExtra)
         assert(altMatch != null) { "ALT_MANGA_ID_REGEX no encontró postId" }
         assert(altMatch!!.groupValues[1] == "67890") { "postId incorrecto" }
+    }
+
+    @Test
+    fun testActionRegexAgainstGetCaps7Pattern() {
+        // Simulates the actual site's script format for getcaps7 endpoint
+        val scriptContents = """
+            function loadChapters() {
+                jQuery.ajax({
+                    url: "/wp-json/muslitos/v1/getcaps7",
+                    type: "POST",
+                    data: {
+                        action: "muslitos_anti_hack",
+                        secret: "mihonsuckmydick",
+                        page: 1
+                    },
+                    success: function(response) {}
+                });
+            }
+        """.trimIndent()
+
+        val match = MangasNoSekaiPatterns.ACTION_REGEX.find(scriptContents)
+        assert(match != null) { "ACTION_REGEX no encontró coincidencia en script getcaps7" }
+
+        val url = match!!.groupValues[1].takeIf { it.isNotEmpty() }
+            ?: match.groupValues[2].takeIf { it.isNotEmpty() }
+            ?: match.groupValues[3].takeIf { it.isNotEmpty() }
+            ?: match.groupValues[4]
+        assert(url.isNotBlank()) { "URL extraída está en blanco" }
+        assert(url.contains("getcaps7")) { "URL no contiene getcaps7" }
+
+        val data = match.groupValues.getOrNull(5)
+        assert(data != null && data.isNotBlank()) { "Data no extraída del script" }
+        assert(data!!.contains("muslitos_anti_hack")) { "Data no contiene action muslitos_anti_hack" }
+        assert(data.contains("mihonsuckmydick")) { "Data no contiene secret" }
+    }
+
+    @Test
+    fun testObjectsRegexExtractsActionAndSecret() {
+        // Tests extraction of the actual parameters used by the site
+        val dataBlock = """
+            action: "muslitos_anti_hack",
+            secret: "mihonsuckmydick",
+            page: 1
+        """.trimIndent()
+
+        val validPairs = MangasNoSekaiPatterns.OBJECTS_REGEX.findAll(dataBlock)
+            .mapNotNull { match ->
+                val key = match.groupValues[1]
+                val value = match.groupValues.getOrNull(2).takeIf { !it.isNullOrEmpty() }
+                    ?: match.groupValues.getOrNull(3).takeIf { !it.isNullOrEmpty() }
+                    ?: match.groupValues.getOrNull(4).takeIf { !it.isNullOrEmpty() }
+                if (!value.isNullOrEmpty()) key to value else null
+            }
+            .toList()
+
+        assert(validPairs.size == 3) { "Se esperaban 3 pares, se encontraron ${validPairs.size}" }
+        assert(validPairs.any { it.first == "action" && it.second == "muslitos_anti_hack" }) {
+            "No se encontró action=muslitos_anti_hack"
+        }
+        assert(validPairs.any { it.first == "secret" && it.second == "mihonsuckmydick" }) {
+            "No se encontró secret=mihonsuckmydick"
+        }
     }
 
     // ============================================
