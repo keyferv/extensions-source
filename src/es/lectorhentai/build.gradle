@@ -5,6 +5,6 @@ ext {
     isNsfw = true
 }
 
-apply from: "$rootDir/common.gradle"
+apply plugin: "kei.plugins.extension.legacy"
 
 // Usamos la configuración por defecto de common.gradle (res/)

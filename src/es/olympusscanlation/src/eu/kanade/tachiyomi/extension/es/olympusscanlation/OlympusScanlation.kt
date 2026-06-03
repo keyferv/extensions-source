@@ -96,11 +96,25 @@ class OlympusScanlation :
             .newBuilder()
             .rateLimitHost(fetchedDomainUrl.toHttpUrl(), 1, 2)
             .rateLimitHost(dashboardApiBaseUrl.toHttpUrl(), 2, 1)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val response = chain.proceed(request)
+                if (response.isSuccessful || !request.url.encodedPath.contains("/storage/")) return@addInterceptor response
+                response.close()
+                var retries = 0
+                while (retries < IMAGE_MAX_RETRIES) {
+                    retries++
+                    Thread.sleep(IMAGE_RETRY_DELAY_MS)
+                    val retry = chain.proceed(request)
+                    if (retry.isSuccessful) return@addInterceptor retry
+                    retry.close()
+                }
+                chain.proceed(request)
+            }
             .addNetworkInterceptor { chain ->
                 val request = chain.request()
                 val response = chain.proceed(request)
 
-                // Only log for dashboard requests
                 if (request.url.host.contains("dashboard")) {
                     Log.d("OlympusScanlation", "[OlympusDebug] Request: ${request.method} ${request.url}")
                     Log.d("OlympusScanlation", "[OlympusDebug] Headers: ${request.headers}")
@@ -887,6 +901,8 @@ class OlympusScanlation :
 
     companion object {
         private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
+        private const val IMAGE_MAX_RETRIES = 2
+        private const val IMAGE_RETRY_DELAY_MS = 1500L
     }
 
     init {

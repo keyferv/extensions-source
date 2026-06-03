@@ -8,7 +8,10 @@ import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.ConfigurableSource
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Response
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.text.SimpleDateFormat
@@ -24,8 +27,37 @@ class MHScans :
     ),
     ConfigurableSource {
     override val client: OkHttpClient = super.client.newBuilder()
-        .rateLimit(1, 3, TimeUnit.SECONDS)
+        .rateLimit(3, 1, TimeUnit.SECONDS)
+        .addInterceptor(::imageRetryInterceptor)
         .build()
+
+    private fun imageRetryInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+        if (response.isSuccessful || !request.url.host.contains("wsrv.nl")) return response
+        response.close()
+        var retries = 0
+        while (retries < MAX_RETRIES) {
+            retries++
+            Thread.sleep(RETRY_DELAY_MS)
+            val retryResponse = chain.proceed(request)
+            if (retryResponse.isSuccessful) return retryResponse
+            retryResponse.close()
+        }
+        return chain.proceed(request)
+    }
+
+    override fun processThumbnail(url: String?, fromSearch: Boolean): String? {
+        if (url == null) return null
+        val parsed = url.toHttpUrlOrNull() ?: return url
+        if (!parsed.host.contains("wsrv.nl")) return url
+        return parsed.newBuilder()
+            .setQueryParameter("output", "webp")
+            .setQueryParameter("q", "80")
+            .setQueryParameter("default", "1")
+            .build()
+            .toString()
+    }
 
     override val useNewChapterEndpoint = true
     override val useLoadMoreRequest = LoadMoreStrategy.Always
@@ -55,5 +87,7 @@ class MHScans :
 
     companion object {
         private const val BASE_URL_PREF = "overrideBaseUrl"
+        private const val MAX_RETRIES = 2
+        private const val RETRY_DELAY_MS = 1000L
     }
 }
