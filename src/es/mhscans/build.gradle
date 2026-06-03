@@ -3,8 +3,9 @@ ext {
     extClass = '.MHScans'
     themePkg = 'madara'
     baseUrl = 'https://mhscans.com'
-    overrideVersionCode = 12
+
+    overrideVersionCode = 13
     isNsfw = false
 }
 
-apply plugin: "kei.plugins.extension.legacy"
+apply from: "$rootDir/common.gradle"

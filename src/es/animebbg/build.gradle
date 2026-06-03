@@ -1,0 +1,9 @@
+ext {
+    extName = 'AnimeBBG'
+    extClass = '.AnimeBBG'
+    baseUrl = 'https://animebbg.net'
+    extVersionCode = 6
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

@@ -1,0 +1,201 @@
+package eu.kanade.tachiyomi.extension.es.animebbg
+
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
+import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.util.asJsoup
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Request
+import okhttp3.Response
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+
+class AnimeBBG : ParsedHttpSource() {
+
+    override val name = "AnimeBBG"
+
+    override val baseUrl = "https://animebbg.net"
+
+    override val lang = "es"
+
+    override val supportsLatest = true
+    private val seenLatestManga = mutableSetOf<String>()
+    private var latestUpdatesId: String? = null
+
+    // Popular
+
+    override fun popularMangaRequest(page: Int): Request = GET(baseUrl, headers)
+
+    override fun popularMangaSelector(): String = "div.comic"
+
+    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
+        val titleElement = element.selectFirst("a.comic-title")
+        setUrlWithoutDomain(titleElement?.attr("href") ?: "")
+        title = titleElement?.text()?.trim() ?: ""
+        thumbnail_url = element.selectFirst("div.comic-image img")?.attr("abs:src")
+    }
+
+    override fun popularMangaNextPageSelector(): String? = null
+
+    // Latest
+
+    override fun latestUpdatesRequest(page: Int): Request {
+        if (page == 1) {
+            seenLatestManga.clear()
+            latestUpdatesId = null
+            return GET("$baseUrl/whats-new/resource-albums/", headers)
+        }
+        val idTemplate = if (latestUpdatesId != null) "$latestUpdatesId/" else ""
+        return GET("$baseUrl/whats-new/resource-albums/${idTemplate}page-$page", headers)
+    }
+
+    override fun latestUpdatesSelector(): String = "div.structItem--albumLink"
+
+    override fun latestUpdatesFromElement(element: Element): SManga = SManga.create().apply {
+        val mangaLink = element.selectFirst(".structItem-title a:last-of-type")
+        setUrlWithoutDomain(mangaLink?.attr("href") ?: "")
+        title = mangaLink?.text() ?: ""
+        thumbnail_url = element.selectFirst(".structItem-iconContainer img")?.attr("abs:src")
+    }
+
+    override fun latestUpdatesNextPageSelector(): String = "a.pageNav-jump--next"
+
+    override fun latestUpdatesParse(response: Response): eu.kanade.tachiyomi.source.model.MangasPage {
+        val document = response.asJsoup()
+
+        // Extract/Update ID for next pages
+        val nextUrl = document.selectFirst(latestUpdatesNextPageSelector())?.attr("href")
+        if (nextUrl != null) {
+            val newId = nextUrl.substringAfter("/resource-albums/", "").substringBefore("/", "")
+            if (newId.isNotEmpty() && newId.all { it.isDigit() }) {
+                latestUpdatesId = newId
+            }
+        }
+
+        val mangas = document.select(latestUpdatesSelector()).map { element ->
+            latestUpdatesFromElement(element)
+        }
+
+        val hasNextPage = document.selectFirst(latestUpdatesNextPageSelector()) != null
+
+        val filteredMangas = mangas.filter { seenLatestManga.add(it.url) }
+
+        // If current page is empty after filtering but there's more, fetch next
+        if (filteredMangas.isEmpty() && hasNextPage) {
+            val currentUrl = response.request.url.toString()
+            val page = currentUrl.substringAfter("page-", "1").toIntOrNull() ?: 1
+            if (page < 100) { // Safety limit
+                return latestUpdatesParse(client.newCall(latestUpdatesRequest(page + 1)).execute())
+            }
+        }
+
+        return eu.kanade.tachiyomi.source.model.MangasPage(filteredMangas, hasNextPage)
+    }
+
+    // Search
+
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val url = "$baseUrl/search/search".toHttpUrlOrNull()!!.newBuilder()
+            .addQueryParameter("keywords", query)
+            .addQueryParameter("c[title_only]", "1")
+            .addQueryParameter("o", "date")
+            .addQueryParameter("page", page.toString())
+            .build()
+
+        return GET(url, headers)
+    }
+
+    override fun searchMangaSelector(): String = "div.contentRow:has(h3.contentRow-title a[href*='/comics/']):not(:has(span.label:contains(Discusión)))"
+
+    override fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
+        val link = element.selectFirst("h3.contentRow-title a")
+        setUrlWithoutDomain(link?.attr("href") ?: "")
+        title = link?.ownText()?.trim() ?: link?.text()?.trim() ?: ""
+        thumbnail_url = "" // Real thumbnail is fetched in mangaDetailsParse
+    }
+
+    override fun searchMangaNextPageSelector(): String = "a.pageNav-jump--next"
+
+    // Details
+
+    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst("h1.p-title-value")?.ownText()?.trim()
+            ?: document.select("h1.p-title-value").text().substringAfter(" Manhwa ").trim()
+        description = document.select("div.bbWrapper").text()
+        author = document.select("a.username[data-user-id]").firstOrNull()?.text()
+        genre = document.select("a.tagItem, dl[data-field='demografia'] dd").joinToString { it.text() }
+        status = when (document.select("dl[data-field='status'] dd").text()) {
+            "Publicándose" -> SManga.ONGOING
+            "Terminado" -> SManga.COMPLETED
+            else -> SManga.UNKNOWN
+        }
+        thumbnail_url = document.selectFirst("div.resourceSidebarGroup--banner img, div.ozzmodz-adult-inner img")?.attr("abs:src")
+    }
+
+    // Chapters
+
+    override fun chapterListRequest(manga: SManga): Request = chapterListRequest(manga, 1)
+
+    private fun chapterListRequest(manga: SManga, page: Int): Request =
+        GET(baseUrl + manga.url.removeSuffix("/") + "/capitulos" + if (page > 1) "?page=$page" else "", headers)
+
+    override fun chapterListSelector(): String = "div.md-chapter-row"
+
+    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
+        val link = element.selectFirst("a.md-chapter-link")
+        setUrlWithoutDomain(link?.attr("href") ?: "")
+        val title = link?.text()?.trim() ?: ""
+        val isLocked = element.selectFirst(".md-bbgMetaItem--lock") != null
+        name = if (isLocked) "$title 🔒" else title
+    }
+
+    override fun chapterListParse(response: Response): List<SChapter> {
+        var document = response.asJsoup()
+
+        // If not on chapters page, try to find the link from the tab
+        if (document.selectFirst(chapterListSelector()) == null) {
+            val tabUrl = document.selectFirst("a.tabs-tab[href$='/capitulos']")?.attr("abs:href")
+            if (tabUrl != null) {
+                document = client.newCall(GET(tabUrl, headers)).execute().asJsoup()
+            }
+        }
+
+        val chapters = mutableListOf<SChapter>()
+        var page = 1
+
+        val mangaUrl = document.location().substringBefore("/capitulos").substringAfter(baseUrl)
+        val manga = SManga.create().apply { url = mangaUrl }
+
+        while (true) {
+            chapters.addAll(document.select(chapterListSelector()).map { element -> chapterFromElement(element) })
+            val nextPage = document.selectFirst("a.pageNav-jump--next")
+            if (nextPage == null) break
+
+            page++
+            val nextResponse = client.newCall(chapterListRequest(manga, page)).execute()
+            document = nextResponse.asJsoup()
+        }
+
+        return chapters
+    }
+
+    // Pages
+
+    override fun pageListParse(document: Document): List<Page> {
+        // New avmReader format: images use data-src for lazy loading
+        val images = document.select("div.avmReader-page:not(.avmReader-page--end) img.js-avmImage")
+
+        // Fallback to old format if avmReader not found
+        val elements = if (images.isNotEmpty()) images else document.select("div.media-container img, img.js-mediaImage")
+
+        return elements.mapIndexed { i, img ->
+            val imageUrl = img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
+            Page(i, "", imageUrl)
+        }.filter { it.imageUrl!!.isNotEmpty() && !it.imageUrl!!.contains("data:image") }
+    }
+
+    override fun imageUrlParse(document: Document): String = ""
+}

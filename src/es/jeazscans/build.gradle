@@ -1,8 +1,9 @@
 ext {
     extName = 'Jeaz Scans'
     extClass = '.JeazScans'
-    extVersionCode = 66
+    baseUrl = 'https://lectorhub.j5z.xyz'
+    extVersionCode = 67
     isNsfw = false
 }
 
-apply plugin: "kei.plugins.extension.legacy"
+apply from: "$rootDir/common.gradle"

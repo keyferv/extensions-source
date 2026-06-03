@@ -32,7 +32,7 @@ class PlotTwistNoFansub : HttpSource() {
 
     override val supportsLatest = true
 
-    override val client: OkHttpClient = network.client.newBuilder()
+    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .rateLimit(2, 1, TimeUnit.SECONDS)
         .build()
 
@@ -137,7 +137,7 @@ class PlotTwistNoFansub : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga {
         val document = response.asJsoup()
         return SManga.create().apply {
-            title = document.selectFirst("p.mn-title-block")?.text()
+            title = document.selectFirst(".mn-detail-title-row h1.mn-detail-title")?.text()
                 ?: document.selectFirst("p.titleMangaSingle")?.text()
                 ?: document.selectFirst(".post-title h1, .post-title h3")?.text()
                 ?: throw Exception("Manga title not found")

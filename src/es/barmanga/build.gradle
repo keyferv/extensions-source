@@ -2,9 +2,9 @@ ext {
     extName = 'BarManga'
     extClass = '.BarManga'
     themePkg = 'madara'
-    baseUrl = 'https://archiviumbar.com'
-    overrideVersionCode = 11
+    baseUrl = 'https://libribar.com'
+    overrideVersionCode = 15
     isNsfw = true
 }
 
-apply plugin: "kei.plugins.extension.legacy"
+apply from: "$rootDir/common.gradle"
