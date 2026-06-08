@@ -25,17 +25,16 @@ class AnimeBBG : ParsedHttpSource() {
     private val seenLatestManga = mutableSetOf<String>()
     private var latestUpdatesId: String? = null
 
-    // Popular
+    // Popular (Top 10 Ranking - Day)
 
     override fun popularMangaRequest(page: Int): Request = GET(baseUrl, headers)
 
-    override fun popularMangaSelector(): String = "div.comic"
+    override fun popularMangaSelector(): String = "a.xcHomeV2-rankCard"
 
     override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
-        val titleElement = element.selectFirst("a.comic-title")
-        setUrlWithoutDomain(titleElement?.attr("href") ?: "")
-        title = titleElement?.text()?.trim() ?: ""
-        thumbnail_url = element.selectFirst("div.comic-image img")?.attr("abs:src")
+        setUrlWithoutDomain(element.attr("href"))
+        title = element.selectFirst("strong")?.text()?.trim() ?: ""
+        thumbnail_url = element.selectFirst("img")?.attr("abs:src")
     }
 
     override fun popularMangaNextPageSelector(): String? = null
@@ -139,8 +138,7 @@ class AnimeBBG : ParsedHttpSource() {
 
     override fun chapterListRequest(manga: SManga): Request = chapterListRequest(manga, 1)
 
-    private fun chapterListRequest(manga: SManga, page: Int): Request =
-        GET(baseUrl + manga.url.removeSuffix("/") + "/capitulos" + if (page > 1) "?page=$page" else "", headers)
+    private fun chapterListRequest(manga: SManga, page: Int): Request = GET(baseUrl + manga.url.removeSuffix("/") + "/capitulos" + if (page > 1) "?page=$page" else "", headers)
 
     override fun chapterListSelector(): String = "div.md-chapter-row"
 
@@ -186,15 +184,41 @@ class AnimeBBG : ParsedHttpSource() {
 
     override fun pageListParse(document: Document): List<Page> {
         // New avmReader format: images use data-src for lazy loading
-        val images = document.select("div.avmReader-page:not(.avmReader-page--end) img.js-avmImage")
+        val pages = document.select("div.avmReader-page:not(.avmReader-page--end)")
 
-        // Fallback to old format if avmReader not found
-        val elements = if (images.isNotEmpty()) images else document.select("div.media-container img, img.js-mediaImage")
+        if (pages.isEmpty()) {
+            // Fallback to old format
+            val images = document.select("div.media-container img, img.js-mediaImage")
+            return images.mapIndexed { i, img ->
+                val imageUrl = img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
+                Page(i, "", imageUrl)
+            }.filter { it.imageUrl!!.isNotEmpty() && !it.imageUrl!!.contains("data:image") }
+        }
 
-        return elements.mapIndexed { i, img ->
-            val imageUrl = img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
-            Page(i, "", imageUrl)
-        }.filter { it.imageUrl!!.isNotEmpty() && !it.imageUrl!!.contains("data:image") }
+        // Extract chapter number from first page that has a URL
+        val firstPageWithUrl = pages.firstOrNull { it.selectFirst("img[data-src]")?.attr("data-src")?.isNotEmpty() == true }
+        val chapterPrefix = firstPageWithUrl?.selectFirst("img[data-src]")?.attr("data-src")
+            ?.substringAfter("/libreria/")?.substringBeforeLast(".")?.substringBeforeLast("-") ?: ""
+
+        return pages.mapIndexed { i, page ->
+            val img = page.selectFirst("img[data-src], img[src]")
+            val imageUrl = img?.attr("abs:data-src")?.ifEmpty { img.attr("abs:src") }.orEmpty()
+
+            if (imageUrl.isNotEmpty() && !imageUrl.contains("data:image")) {
+                // Page has a direct URL
+                Page(i, "", imageUrl)
+            } else {
+                // Deferred page: construct URL from media ID
+                val mediaId = page.attr("data-media-id")
+                if (mediaId.isNotEmpty() && chapterPrefix.isNotEmpty()) {
+                    val pageNumber = (i + 1).toString().padStart(3, '0')
+                    val constructedUrl = "$baseUrl/libreria/$chapterPrefix-$pageNumber.$mediaId/full"
+                    Page(i, "", constructedUrl)
+                } else {
+                    null
+                }
+            }
+        }.filterNotNull()
     }
 
     override fun imageUrlParse(document: Document): String = ""
