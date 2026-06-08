@@ -90,7 +90,8 @@ class Comix :
     override fun imageRequest(page: Page): Request {
         val imageUrl = page.imageUrl ?: return super.imageRequest(page)
         val imageHost = imageUrl.substringBefore('#').toHttpUrlOrNull()?.host.orEmpty()
-        val requestHeaders = if (imageHost.isNotEmpty() && !imageHost.contains("comix.to")) {
+        val isScrambled = imageUrl.contains("#scrambled")
+        val requestHeaders = if (imageHost.isNotEmpty() && !imageHost.contains("comix.to") && !isScrambled) {
             headersBuilder()
                 .removeAll("Origin")
                 .build()
@@ -515,8 +516,9 @@ class Comix :
         val base = pages.baseUrl.trimEnd('/')
 
         pages.items.mapIndexed { index, img ->
+            val isScrambled = img.s == 1 || (index + 1) % 4 == 0
             val full = if (img.url.startsWith("http")) img.url else "$base/${img.url.trimStart('/')}"
-            val url = if (img.s == 1) "$full#scrambled" else full
+            val url = if (isScrambled) "$full#scrambled" else full
             Page(index, imageUrl = url)
         }
     }
