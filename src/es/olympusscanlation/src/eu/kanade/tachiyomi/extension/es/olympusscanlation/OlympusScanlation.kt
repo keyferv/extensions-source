@@ -25,7 +25,6 @@ import uy.kohesive.injekt.injectLazy
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
-import kotlin.math.min
 
 class OlympusScanlation :
     HttpSource(),
@@ -283,13 +282,14 @@ class OlympusScanlation :
             if (query.length < 3) {
                 throw Exception("La búsqueda debe tener al menos 3 caracteres")
             }
-            // Use validated public API endpoint
+            // El servidor ignora el parámetro "name" en /api/series.
+            // Usar /api/series/list (devuelve TODOS los cómics) y filtrar localmente.
+            // Se agrega "q" como query dummy para pasar el texto al parser.
             val apiUrl =
-                "$publicApiBaseUrl/api/series"
+                "$publicApiBaseUrl/api/series/list"
                     .toHttpUrl()
                     .newBuilder()
-                    .addQueryParameter("name", query.substring(0, min(query.length, 40)))
-                    .addQueryParameter("type", "comic")
+                    .addQueryParameter("q", query)
                     .build()
             return GET(apiUrl, headers)
         }
@@ -352,8 +352,22 @@ class OlympusScanlation :
                 .toString()
                 .startsWith("$publicApiBaseUrl/api/series")
         ) {
+            // /api/series/list?q=<query> — buscar por texto completo con filtrado local
+            // /api/series?... — búsqueda por filtros (sin texto)
+            val searchQuery =
+                response.request.url.queryParameter("q")?.trim()?.lowercase().orEmpty()
+                    .ifEmpty { response.request.url.queryParameter("name")?.trim()?.lowercase().orEmpty() }
             val mangaList =
-                json.decodeMangaListPayload(body).filter { it.type == "comic" }.map { dto ->
+                json.decodeMangaListPayload(body).filter { it.type == "comic" }.let { list ->
+                    if (searchQuery.length >= 2) {
+                        list.filter { dto ->
+                            dto.name.lowercase().contains(searchQuery) ||
+                                dto.slug.lowercase().contains(searchQuery)
+                        }
+                    } else {
+                        list
+                    }
+                }.map { dto ->
                     cacheManager.updateMangaCache(dto)
                     dto.toSManga(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
                 }
@@ -399,6 +413,8 @@ class OlympusScanlation :
             logHttpIssue("mangaDetailsParse#errorPage", response)
             val title = response.request.tag(MangaTitleTag::class.java)?.title
             val currentId = taggedId
+
+            // Intentar con caché actual primero
             val match = title?.let { apiHelper.resolveMangaByName(it, currentId, cacheManager) }
             if (match != null) {
                 cacheManager.updateMangaCache(match)
@@ -406,6 +422,20 @@ class OlympusScanlation :
                 updateTaggedMangaUrl(response, match.slug)
                 return details
             }
+
+            // Forzar refresh del caché de series (slug probablemente cambió)
+            if (currentId != null) {
+                Log.d("OlympusScanlation", "Forzando refresh de series list para ID: $currentId")
+                apiHelper.forceRefreshSeriesList(cacheManager)
+                val refreshedMatch = apiHelper.resolveMangaById(currentId, cacheManager)
+                if (refreshedMatch != null) {
+                    cacheManager.updateMangaCache(refreshedMatch)
+                    val details = fetchMangaDetailsBySlug(refreshedMatch.slug)
+                    updateTaggedMangaUrl(response, refreshedMatch.slug)
+                    return details
+                }
+            }
+
             // Intentar scraping como último recurso
             val slugFromUrl = response.request.url.toString()
                 .substringAfter("/series/comic-")
@@ -493,6 +523,8 @@ class OlympusScanlation :
             logHttpIssue("chapterListParse#errorPage", response)
             val title = response.request.tag(MangaTitleTag::class.java)?.title
             val currentId = taggedMangaId
+
+            // Intentar con caché actual primero
             val match =
                 currentId?.let { apiHelper.resolveMangaById(it, cacheManager) }
                     ?: title?.let { apiHelper.resolveMangaByName(it, currentId, cacheManager) }
@@ -501,6 +533,19 @@ class OlympusScanlation :
                 updateTaggedMangaUrl(response, match.slug)
                 return fetchChapterListBySlug(match.slug, match.id?.toString() ?: currentId)
             }
+
+            // Forzar refresh del caché de series (slug probablemente cambió)
+            if (currentId != null) {
+                Log.d("OlympusScanlation", "Forzando refresh de series list para ID: $currentId")
+                apiHelper.forceRefreshSeriesList(cacheManager)
+                val refreshedMatch = apiHelper.resolveMangaById(currentId, cacheManager)
+                if (refreshedMatch != null) {
+                    cacheManager.updateMangaCache(refreshedMatch)
+                    updateTaggedMangaUrl(response, refreshedMatch.slug)
+                    return fetchChapterListBySlug(refreshedMatch.slug, currentId)
+                }
+            }
+
             // Intentar scraping como último recurso
             val slugFromUrl = response.request.url.toString().substringAfter("/series/").substringBefore("/chapters")
             return fetchChapterListByScraping(slugFromUrl, currentId)

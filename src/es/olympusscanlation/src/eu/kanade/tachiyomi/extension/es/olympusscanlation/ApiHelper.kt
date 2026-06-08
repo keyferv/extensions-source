@@ -105,35 +105,50 @@ class ApiHelper(
         return cacheManager.getCachedSeriesList()?.firstOrNull { it.slug.trim().removeSuffix("/") == cleanSlug }
     }
 
+    /**
+     * Fuerza la recarga de la lista completa de series desde la API.
+     * Se usa cuando un slug devuelve 404/500 y se necesita el slug actualizado.
+     */
+    fun forceRefreshSeriesList(cacheManager: MangaCacheManager) {
+        synchronized(this) {
+            cacheManager.clearCachedSeriesList() // invalidar caché
+            loadSeriesList(cacheManager)
+        }
+    }
+
     private fun ensureSeriesListLoaded(cacheManager: MangaCacheManager) {
         synchronized(this) {
             if (cacheManager.getCachedSeriesList() != null) return
-            val apiUrl = "$websiteBaseUrl/api/series/list"
-            try {
-                val response =
-                    client
-                        .newCall(
-                            Request
-                                .Builder()
-                                .url(apiUrl)
-                                .headers(
-                                    okhttp3.Headers
-                                        .Builder()
-                                        .apply { headers.forEach { (k, v) -> add(k, v) } }
-                                        .build(),
-                                ).build(),
-                        ).execute()
-                val body = response.body.string()
-                if (!isErrorPage(response.code, body)) {
-                    val series = json.decodeMangaListPayload(body)
-                    cacheManager.setCachedSeriesList(series)
-                    Log.d("OlympusScanlation", "Lista completa cargada: ${series.size} series")
-                } else {
-                    Log.e("OlympusScanlation", "Error al cargar lista completa: ${response.code}")
-                }
-            } catch (e: Exception) {
-                Log.e("OlympusScanlation", "Excepción al cargar lista completa: ${e.message}")
+            loadSeriesList(cacheManager)
+        }
+    }
+
+    private fun loadSeriesList(cacheManager: MangaCacheManager) {
+        val apiUrl = "$websiteBaseUrl/api/series/list"
+        try {
+            val response =
+                client
+                    .newCall(
+                        Request
+                            .Builder()
+                            .url(apiUrl)
+                            .headers(
+                                okhttp3.Headers
+                                    .Builder()
+                                    .apply { headers.forEach { (k, v) -> add(k, v) } }
+                                    .build(),
+                            ).build(),
+                    ).execute()
+            val body = response.body.string()
+            if (!isErrorPage(response.code, body)) {
+                val series = json.decodeMangaListPayload(body)
+                cacheManager.setCachedSeriesList(series)
+                Log.d("OlympusScanlation", "Lista completa cargada: ${series.size} series")
+            } else {
+                Log.e("OlympusScanlation", "Error al cargar lista completa: ${response.code}")
             }
+        } catch (e: Exception) {
+            Log.e("OlympusScanlation", "Excepción al cargar lista completa: ${e.message}")
         }
     }
 
