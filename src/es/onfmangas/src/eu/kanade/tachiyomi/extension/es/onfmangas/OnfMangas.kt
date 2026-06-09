@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.onfmangas
 
+import android.util.Log
+import android.webkit.CookieManager
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -28,32 +30,119 @@ class OnfMangas : HttpSource() {
     override val lang = "es"
     override val supportsLatest = true
 
-    val tokenRegex = Regex("""var token="([^"]+)"""")
+    companion object {
+        private const val TAG = "OnfMangas"
+        private val BLOCKED_MARKER = Regex("Acceso Restringido|Acceso Denegado", RegexOption.IGNORE_CASE)
+        private val CHALLENGE_MARKER = Regex("Verificando\\.\\.\\.", RegexOption.IGNORE_CASE)
+
+        // Challenge page embeds two hex vars that get concatenated and reversed to form __onf_chk.
+        // Example: var _0x1 = "5a89..."; var _0x2 = "3bf4..."; → (__0x2 + _0x1).reversed()
+        private val CHALLENGE_VARS_REGEX = Regex(
+            """var _0x1\s*=\s*"([^"]+)";\s*var _0x2\s*=\s*"([^"]+)"""",
+        )
+    }
 
     override val client = super.client.newBuilder()
         .addInterceptor(::onfTokenInterceptor)
         .build()
 
+    /**
+     * Interceptor that handles the site's custom JS challenge.
+     *
+     * The site serves a "Verificando..." page with inline JS that computes
+     * an __onf_chk cookie: (_0x2 + _0x1).reversed(). We extract the two
+     * hex vars, compute the token, set the cookie, and retry — no WebView needed.
+     */
     private fun onfTokenInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val response = chain.proceed(request)
+        val url = request.url.toString()
 
-        val body = response.peekBody(8192).string()
-        val token = tokenRegex.find(body)?.groupValues?.get(1) ?: return response
+        // Sync any existing cookies from WebView (PHPSESSID, __onf_chk)
+        syncCookiesFromWebView(url)
 
-        response.close()
-        val cookie = Cookie.parse(request.url, "__onf_chk=$token; path=/")
-        client.cookieJar.saveFromResponse(request.url, listOfNotNull(cookie))
+        var response = chain.proceed(request)
 
-        return chain.proceed(request)
+        val contentType = response.header("Content-Type")
+        if (contentType == null || "text/html" !in contentType) {
+            return response
+        }
+
+        val body = response.peekBody(16_384).string()
+
+        // Check for the site's JS challenge page ("Verificando...")
+        if (CHALLENGE_MARKER.containsMatchIn(body)) {
+            response.close()
+
+            val match = CHALLENGE_VARS_REGEX.find(body)
+            if (match != null) {
+                val ox1 = match.groupValues[1]
+                val ox2 = match.groupValues[2]
+                val token = (ox2 + ox1).reversed()
+                Log.d(TAG, "Challenge solved: __onf_chk=${token.take(8)}...")
+
+                val cookie = Cookie.parse(request.url, "__onf_chk=$token; path=/")
+                client.cookieJar.saveFromResponse(request.url, listOfNotNull(cookie))
+
+                response = chain.proceed(request)
+
+                // Verify we got past the challenge
+                val retryBody = response.peekBody(16_384).string()
+                if (CHALLENGE_MARKER.containsMatchIn(retryBody)) {
+                    Log.w(TAG, "Challenge: still blocked after token — site may have changed format")
+                } else {
+                    Log.d(TAG, "Challenge: solved successfully")
+                }
+            } else {
+                Log.w(TAG, "Challenge: could not extract _0x1/_0x2 vars — format changed?")
+                // Fallback: try syncing from WebView in case user solved it there
+                syncCookiesFromWebView(url)
+                response = chain.proceed(request)
+            }
+
+            return response
+        }
+
+        // Check for block page
+        if (BLOCKED_MARKER.containsMatchIn(body)) {
+            Log.w(TAG, "BLOCKED by anti-bot: $url")
+        }
+
+        return response
     }
 
-    // Mimic a standard desktop browser to bypass Cloudflare WAF 403s
+    /**
+     * Sync cookies from Android's CookieManager (WebView) to OkHttp's cookie jar.
+     * Copies PHPSESSID and __onf_chk so OkHttp shares the WebView session.
+     */
+    private fun syncCookiesFromWebView(url: String) {
+        val cookieManager = CookieManager.getInstance()
+        val cookies = cookieManager.getCookie(url) ?: return
+        val httpUrl = url.toHttpUrl()
+
+        for (cookiePart in cookies.split(";")) {
+            val cookie = Cookie.parse(httpUrl, cookiePart.trim()) ?: continue
+            client.cookieJar.saveFromResponse(httpUrl, listOf(cookie))
+        }
+    }
+
+    /**
+     * Chrome desktop headers with Client Hints + Fetch Metadata.
+     *
+     * The site checks sec-ch-ua / sec-fetch-* headers server-side.
+     * Without them, content pages return "Acceso Restringido".
+     * OkHttp doesn't send these by default — we set them explicitly.
+     */
     override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0")
-        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .set("Accept-Language", "en-US,en;q=0.9")
-        .set("Sec-Fetch-Site", "none")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
+        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+        .set("Accept-Language", "es-ES,es;q=0.9")
+        .set("sec-ch-ua", "\"Google Chrome\";v=\"137\", \"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"")
+        .set("sec-ch-ua-mobile", "?0")
+        .set("sec-ch-ua-platform", "\"Windows\"")
+        .set("sec-fetch-site", "none")
+        .set("sec-fetch-mode", "navigate")
+        .set("sec-fetch-user", "?1")
+        .set("sec-fetch-dest", "document")
 
     private val dateFormat by lazy {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply {
@@ -67,6 +156,7 @@ class OnfMangas : HttpSource() {
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
+        Log.d(TAG, "Popular HTML (first 500): ${document.html().take(500)}")
         val mangas = document.select("a.pop-podium-card, a.pop-card").mapNotNull { element ->
             SManga.create().apply {
                 title = element.selectFirst(".pop-podium-name, .pop-name")?.text()
@@ -80,6 +170,7 @@ class OnfMangas : HttpSource() {
                 thumbnail_url = element.selectFirst("img")?.attr("abs:src")
             }
         }
+        Log.d(TAG, "Popular: parsed ${mangas.size} mangas")
         return MangasPage(mangas, false)
     }
 
@@ -89,6 +180,7 @@ class OnfMangas : HttpSource() {
 
     override fun latestUpdatesParse(response: Response): MangasPage {
         val document = response.asJsoup()
+        Log.d(TAG, "Latest HTML (first 500): ${document.html().take(500)}")
         val mangas = document.select(".manga-grid .manga-card").mapNotNull { element ->
             SManga.create().apply {
                 title = element.selectFirst(".manga-title")?.text()
@@ -101,6 +193,7 @@ class OnfMangas : HttpSource() {
             }
         }
         val hasNextPage = document.selectFirst(".pagination a.page-btn:contains(Siguiente)") != null
+        Log.d(TAG, "Latest: parsed ${mangas.size} mangas, hasNext=$hasNextPage")
         return MangasPage(mangas, hasNextPage)
     }
 
@@ -139,7 +232,7 @@ class OnfMangas : HttpSource() {
         return SManga.create().apply {
             title = document.selectFirst(".manga-title")?.text()
                 ?.takeIf { it.isNotEmpty() }
-                ?: throw Exception("Could not parse manga title")
+                ?: throw Exception("Could not parse manga title — page may be blocked")
             author = document.selectFirst(".author-link")?.text()
             description = document.selectFirst(".manga-description")?.text()
             genre = document.select(".genre-tag").joinToString { it.text() }
@@ -151,6 +244,7 @@ class OnfMangas : HttpSource() {
                 statusText?.contains("FINALIZADO", true) == true -> SManga.COMPLETED
                 else -> SManga.UNKNOWN
             }
+            Log.d(TAG, "Details: title=$title, status=$statusText")
         }
     }
 
@@ -162,7 +256,11 @@ class OnfMangas : HttpSource() {
             ?.data()
             ?.substringAfter("const _hex = \"")
             ?.substringBefore("\";")
-            ?: return emptyList()
+
+        if (hexString == null) {
+            Log.w(TAG, "Chapters: no _hex data found — page may be blocked or site changed")
+            return emptyList()
+        }
 
         val jsonString = decodeHex(hexString)
         val chaptersData = jsonString.parseAs<List<ChapterDto>>()
@@ -189,6 +287,7 @@ class OnfMangas : HttpSource() {
                 )
             }
         }
+        Log.d(TAG, "Chapters: parsed ${chapters.size} chapters from ${chaptersData.size} entries")
         return chapters
     }
 
@@ -200,11 +299,16 @@ class OnfMangas : HttpSource() {
             ?.data()
             ?.substringAfter("const _hexP = \"")
             ?.substringBefore("\";")
-            ?: return emptyList()
+
+        if (hexString == null) {
+            Log.w(TAG, "Pages: no _hexP data found — page may be blocked or site changed")
+            return emptyList()
+        }
 
         val jsonString = decodeHex(hexString)
         val pagesData = jsonString.parseAs<List<PageDto>>()
 
+        Log.d(TAG, "Pages: parsed ${pagesData.size} pages")
         return pagesData.mapIndexed { index, dto -> dto.toPage(index) }
     }
 
