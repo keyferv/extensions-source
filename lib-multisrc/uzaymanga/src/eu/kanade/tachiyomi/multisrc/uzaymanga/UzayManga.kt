@@ -2,13 +2,13 @@ package eu.kanade.tachiyomi.multisrc.uzaymanga
 
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -203,10 +203,10 @@ abstract class UzayManga(
 
             SChapter.create().apply {
                 val chapName = svelte.resolveString(chapObj, "name")
-                val chapOrder = svelte.resolveInt(chapObj, "order")
+                val chapOrder = svelte.resolveString(chapObj, "order")?.removeSuffix(".0")
                 name = buildString {
                     if (chapOrder != null) append("Bölüm $chapOrder")
-                    if (chapName != null && chapName != chapOrder?.toString()) {
+                    if (chapName != null && chapName != chapOrder) {
                         if (isNotEmpty()) append(" - ")
                         append(chapName)
                     }
