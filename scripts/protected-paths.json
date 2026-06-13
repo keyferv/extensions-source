@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "description": "Extensions protected during upstream sync. Single source of truth.",
+    "engramTopicKey": "workflow/upstream-sync-protect-list",
+    "lastReviewed": "2026-06-13"
+  },
+  "paths": [
+    {
+      "path": "src/es/onfmangas",
+      "note": "JS challenge custom solver (__onf_chk token)"
+    },
+    {
+      "path": "src/es/barmanga",
+      "note": "Primary work — DNS, ZIP anti-scrape, popular/latest restore"
+    },
+    {
+      "path": "src/es/olympusscanlation",
+      "note": "401 fallback scrapers, JSON object/array parsing"
+    },
+    {
+      "path": "src/es/mhscans",
+      "note": "Custom URLs, recurrent fixes"
+    },
+    {
+      "path": "src/es/lectorhentai",
+      "note": "Local version maintained"
+    },
+    {
+      "path": "src/es/mangasnosekai",
+      "note": "Custom AJAX pagination endpoint"
+    },
+    {
+      "path": "src/es/animebbg",
+      "note": "Restored, deferred page loading fix"
+    },
+    {
+      "path": "src/es/jeazscans",
+      "note": "Local version maintained"
+    },
+    {
+      "path": "src/es/plottwistnofansub",
+      "note": "Minor tweak in animebbg commit"
+    }
+  ]
+}
