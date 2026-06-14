@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.rncalation
 
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -13,6 +14,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
@@ -36,53 +38,84 @@ class RNCalation : HttpSource() {
 
     // ============================== Popular ===============================
     override fun popularMangaRequest(page: Int): Request {
-        val url = "$baseUrl/library?sort=views".toHttpUrl().newBuilder().apply {
+        val url = "$baseUrl/library".toHttpUrl().newBuilder().apply {
+            addQueryParameter("sort", "views")
             if (page > 1) addQueryParameter("page", page.toString())
         }.build()
         return GET(url, headers)
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-        val mangas = document.select("a.comic-card").map { element ->
-            SManga.create().apply {
-                setUrlWithoutDomain(element.attr("href"))
-                title = element.selectFirst("p.text-\\[\\.85rem\\]")?.text()
-                    ?: element.selectFirst("p")?.text()
-                    ?: ""
-                thumbnail_url = element.selectFirst("img")?.let { img ->
-                    val src = img.attr("src")
-                    if (src.startsWith("http")) src else baseUrl + src
-                }
-            }
-        }
-        val hasNextPage = document.selectFirst("a[rel=next], button:contains(Siguiente)") != null
-        return MangasPage(mangas, hasNextPage)
-    }
+    override fun popularMangaParse(response: Response): MangasPage = parseLibrary(response)
 
     // =============================== Latest ===============================
     override fun latestUpdatesRequest(page: Int): Request {
         val url = "$baseUrl/library".toHttpUrl().newBuilder().apply {
-            if (page > 1) addQueryParameter("page", page.toString())
-        }.build()
-        return GET(url, headers)
-    }
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    // =============================== Search ===============================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl/search".toHttpUrl().newBuilder().apply {
-            addQueryParameter("q", query)
             addQueryParameter("sort", "latest")
             if (page > 1) addQueryParameter("page", page.toString())
         }.build()
         return GET(url, headers)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
+    override fun latestUpdatesParse(response: Response): MangasPage = parseLibrary(response)
 
-    override fun getFilterList(): FilterList = FilterList()
+    // =============================== Search ===============================
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val url = "$baseUrl/library".toHttpUrl().newBuilder().apply {
+            addQueryParameter("q", query)
+            filters.forEach { filter ->
+                when (filter) {
+                    is TypeFilter -> if (filter.state != 0) addQueryParameter("type", filter.options[filter.state])
+                    is StatusFilter -> if (filter.state != 0) addQueryParameter("status", filter.options[filter.state])
+                    is SortFilter -> addQueryParameter("sort", filter.options[filter.state])
+                    is GenreFilter -> if (filter.state) addQueryParameter("genre", filter.name)
+                    else -> {}
+                }
+            }
+            if (page > 1) addQueryParameter("page", page.toString())
+        }.build()
+        return GET(url, headers)
+    }
+
+    override fun searchMangaParse(response: Response): MangasPage = parseLibrary(response)
+
+    override fun getFilterList(): FilterList = FilterList(
+        TypeFilter(),
+        StatusFilter(),
+        SortFilter(),
+        Filter.Header("Géneros"),
+        GenreFilter("Acción"),
+        GenreFilter("Aventura"),
+        GenreFilter("Comedia"),
+        GenreFilter("Drama"),
+        GenreFilter("Fantasía"),
+        GenreFilter("Fantasia"),
+        GenreFilter("Harem"),
+        GenreFilter("Love"),
+        GenreFilter("Manhua"),
+        GenreFilter("Murim"),
+        GenreFilter("Reencarnacion"),
+        GenreFilter("Romance"),
+        GenreFilter("Supernatural"),
+        GenreFilter("Sistema"),
+        GenreFilter("Cultivación"),
+        GenreFilter("+15"),
+    )
+
+    // ============================== Parsing ===============================
+    private fun parseLibrary(response: Response): MangasPage {
+        val document = response.asJsoup()
+        val mangas = document.select("a.comic-card").map { element ->
+            SManga.create().apply {
+                setUrlWithoutDomain(element.attr("href"))
+                title = element.selectFirst("p.line-clamp-2")?.text()
+                    ?: element.selectFirst("p.text-\\[\\.85rem\\]")?.text()
+                    ?: ""
+                thumbnail_url = element.selectFirst("img")?.imgAttr()
+            }
+        }
+        val hasNextPage = document.selectFirst("nav.lib-pagination a.lib-page-btn--nav[href*=page=]") != null
+        return MangasPage(mangas, hasNextPage)
+    }
 
     // =========================== Manga Details ============================
     override fun getMangaUrl(manga: SManga) = baseUrl + manga.url
@@ -91,12 +124,7 @@ class RNCalation : HttpSource() {
         val document = response.asJsoup()
         return SManga.create().apply {
             title = document.selectFirst("h1")?.text() ?: ""
-
-            thumbnail_url = document.selectFirst("div.sm\\:w-56 img")?.let { img ->
-                val src = img.attr("src")
-                if (src.startsWith("http")) src else baseUrl + src
-            }
-
+            thumbnail_url = document.selectFirst("div.sm\\:w-56 img")?.imgAttr()
             description = document.selectFirst("p.text-sm")?.text()
 
             val badges = document.select("span.comic-badge").map { it.text().trim() }
@@ -105,6 +133,8 @@ class RNCalation : HttpSource() {
             status = when {
                 badges.any { it.contains("En emisión", true) || it.contains("Ongoing", true) } -> SManga.ONGOING
                 badges.any { it.contains("Completed", true) || it.contains("Finalizado", true) } -> SManga.COMPLETED
+                badges.any { it.contains("Hiatus", true) || it.contains("En pausa", true) } -> SManga.ON_HIATUS
+                badges.any { it.contains("Cancelled", true) || it.contains("Cancelado", true) } -> SManga.CANCELLED
                 else -> SManga.UNKNOWN
             }
         }
@@ -134,15 +164,20 @@ class RNCalation : HttpSource() {
     // =============================== Pages ================================
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("div.page-wrap img.page-img").mapIndexed { i, img ->
-            val src = img.attr("src")
-            Page(i, imageUrl = if (src.startsWith("http")) src else baseUrl + src)
+        return document.select("div.page-wrap img").mapIndexed { i, img ->
+            Page(i, imageUrl = img.imgAttr())
         }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     // ============================= Utilities ==============================
+    private fun Element.imgAttr(): String = when {
+        hasAttr("data-src") -> attr("abs:data-src")
+        hasAttr("src") -> attr("abs:src")
+        else -> ""
+    }.trim()
+
     private fun parseDate(dateStr: String?): Long {
         if (dateStr.isNullOrBlank()) return 0
         return try {
@@ -155,4 +190,19 @@ class RNCalation : HttpSource() {
     private val dateFormat by lazy {
         SimpleDateFormat("M/d/yyyy", Locale.ENGLISH)
     }
+
+    // ============================== Filters ===============================
+    class TypeFilter : Filter.Select<String>("Tipo", arrayOf("Todos", "Manga", "Manhwa", "Manhua", "Novel", "Otro"), 0) {
+        val options = arrayOf("", "Manga", "Manhwa", "Manhua", "Novel", "Other")
+    }
+
+    class StatusFilter : Filter.Select<String>("Estado", arrayOf("Todos", "En curso", "Completado", "En pausa", "Cancelado"), 0) {
+        val options = arrayOf("", "Ongoing", "Completed", "Hiatus", "Cancelled")
+    }
+
+    class SortFilter : Filter.Select<String>("Ordenar por", arrayOf("Más reciente", "Actualizado", "Más visto", "Mejor valorado", "A-Z"), 0) {
+        val options = arrayOf("latest", "updated", "views", "rating", "title")
+    }
+
+    class GenreFilter(name: String) : Filter.CheckBox(name, false)
 }
