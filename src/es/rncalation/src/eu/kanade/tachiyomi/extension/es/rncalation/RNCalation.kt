@@ -145,10 +145,14 @@ class RNCalation : HttpSource() {
         val document = response.asJsoup()
         val chapters = mutableListOf<SChapter>()
 
+        // Extract manga slug from URL for building premium chapter URLs
+        val requestUrl = response.request.url.toString()
+        val slug = requestUrl.substringAfterLast("/comics/").substringBefore("/")
+
         // Chapters are in two places:
-        // 1. div#chapter-list a — first ~20 chapters
-        // 2. template#chapters-extra a — remaining chapters
-        val chapterLinks = document.select("div#chapter-list a[href*=/cap/]").toMutableList()
+        // 1. div#chapter-list a — first ~20 chapters (both free and premium)
+        // 2. template#chapters-extra a — remaining chapters (free only, premium not in template)
+        val chapterLinks = document.select("div#chapter-list a").toMutableList()
         val template = document.selectFirst("template#chapters-extra")
         if (template != null) {
             chapterLinks.addAll(template.select("a[href*=/cap/]"))
@@ -157,13 +161,26 @@ class RNCalation : HttpSource() {
         chapterLinks.forEach { a ->
             val href = a.attr("href")
             if (href.isNotEmpty()) {
-                chapters.add(
-                    SChapter.create().apply {
-                        setUrlWithoutDomain(href)
-                        name = a.selectFirst("span.flex-1")?.text()?.trim() ?: ""
-                        date_upload = parseDate(a.selectFirst("span.text-\\[\\.65rem\\]")?.text())
-                    },
-                )
+                val chapterUrl = when {
+                    href.contains("/cap/") -> href // Free chapter: direct link
+                    href.contains("/auth/login?redirect=") -> {
+                        // Premium chapter: extract chapter number from text and build URL
+                        val chapterText = a.selectFirst("span.flex-1")?.text()?.trim() ?: ""
+                        val chapterNum = chapterText.substringAfterLast(" ").takeIf { it.all { it.isDigit() } }
+                        if (chapterNum != null) "/comics/$slug/cap/$chapterNum" else ""
+                    }
+                    else -> ""
+                }
+
+                if (chapterUrl.isNotEmpty()) {
+                    chapters.add(
+                        SChapter.create().apply {
+                            setUrlWithoutDomain(chapterUrl)
+                            name = a.selectFirst("span.flex-1")?.text()?.trim() ?: ""
+                            date_upload = parseDate(a.selectFirst("span.text-\\[\\.65rem\\]")?.text())
+                        },
+                    )
+                }
             }
         }
 
