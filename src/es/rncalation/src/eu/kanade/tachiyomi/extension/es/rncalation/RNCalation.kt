@@ -145,7 +145,16 @@ class RNCalation : HttpSource() {
         val document = response.asJsoup()
         val chapters = mutableListOf<SChapter>()
 
-        document.select("div#chapter-list a").forEach { a ->
+        // Chapters are in two places:
+        // 1. div#chapter-list a — first ~20 chapters
+        // 2. template#chapters-extra a — remaining chapters
+        val chapterLinks = document.select("div#chapter-list a[href*=/cap/]").toMutableList()
+        val template = document.selectFirst("template#chapters-extra")
+        if (template != null) {
+            chapterLinks.addAll(template.select("a[href*=/cap/]"))
+        }
+
+        chapterLinks.forEach { a ->
             val href = a.attr("href")
             if (href.isNotEmpty()) {
                 chapters.add(
