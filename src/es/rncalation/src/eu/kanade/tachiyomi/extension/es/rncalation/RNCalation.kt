@@ -173,10 +173,12 @@ class RNCalation : HttpSource() {
                 }
 
                 if (chapterUrl.isNotEmpty()) {
+                    val isPremium = href.contains("/auth/login?redirect=")
+                    val chapterName = a.selectFirst("span.flex-1")?.text()?.trim() ?: ""
                     chapters.add(
                         SChapter.create().apply {
                             setUrlWithoutDomain(chapterUrl)
-                            name = a.selectFirst("span.flex-1")?.text()?.trim() ?: ""
+                            name = if (isPremium) "🔒 $chapterName" else chapterName
                             date_upload = parseDate(a.selectFirst("span.text-\\[\\.65rem\\]")?.text())
                         },
                     )
