@@ -40,6 +40,10 @@
     {
       "path": "src/es/plottwistnofansub",
       "note": "Minor tweak in animebbg commit"
+    },
+    {
+      "path": "src/es/rncalation",
+      "note": "New extension for rncalation.online (Knight No Scanlation + Traducciones Amistosas merge)"
     }
   ]
 }
