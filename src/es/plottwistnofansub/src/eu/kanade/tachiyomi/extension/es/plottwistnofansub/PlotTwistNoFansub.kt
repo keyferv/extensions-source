@@ -17,6 +17,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -136,12 +137,13 @@ class PlotTwistNoFansub : HttpSource() {
             val statusPill = document.selectFirst(".mn-detail-pill-value")?.text() ?: ""
             val statusClass = document.selectFirst(".mn-detail-pill-value")?.classNames()
                 ?.firstOrNull { it.startsWith("mn-st-") } ?: ""
+            val statusText = statusPill.lowercase(Locale.ROOT)
 
             status = when {
-                statusClass == "mn-st-emit" || statusPill.contains("en emisión", true) || statusPill.contains("en curso", true) -> SManga.ONGOING
-                statusClass == "mn-st-comp" || statusPill.contains("finalizado", true) || statusPill.contains("completado", true) -> SManga.COMPLETED
-                statusClass == "mn-st-cancel" || statusPill.contains("cancelado", true) -> SManga.CANCELLED
-                statusClass == "mn-st-pause" || statusPill.contains("en espera", true) -> SManga.ON_HIATUS
+                statusClass == "mn-st-emit" || statusText.contains("en emisión") || statusText.contains("en curso") -> SManga.ONGOING
+                statusClass == "mn-st-comp" || statusText.contains("finalizado") || statusText.contains("completado") -> SManga.COMPLETED
+                statusClass == "mn-st-cancel" || statusText.contains("cancelado") -> SManga.CANCELLED
+                statusClass == "mn-st-pause" || statusText.contains("en espera") -> SManga.ON_HIATUS
                 else -> SManga.UNKNOWN
             }
         }
@@ -205,7 +207,7 @@ class PlotTwistNoFansub : HttpSource() {
             if (apiData.data.html.isEmpty() || !apiData.data.hasMore) {
                 hasNextPage = false
             } else {
-                val fragment = org.jsoup.Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
+                val fragment = Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
                 fragment.body().select("a.mn-detail-chapter-item").forEach { a ->
                     val url = a.attr("abs:href").ifEmpty { a.attr("href") }
                     if (url.isNotEmpty()) {
@@ -236,7 +238,7 @@ class PlotTwistNoFansub : HttpSource() {
     // =============================== Pages ================================
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("div.pg-box img, div.page-break img").mapIndexed { i, img ->
+        return document.select("div.reading-content img").mapIndexed { i, img ->
             Page(i, imageUrl = img.imgAttr())
         }
     }
