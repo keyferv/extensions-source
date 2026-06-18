@@ -189,9 +189,9 @@ class PlotTwistNoFansub : HttpSource() {
         // AJAX-loaded chapters via admin-ajax.php
         // New endpoint: action=plot_load_chapters&manga_id=X&page=N
         var page = 2
-        var hasNextPage = chapters.isNotEmpty()
+        var hasMore = chapters.isNotEmpty()
 
-        while (hasNextPage) {
+        while (hasMore) {
             val form = FormBody.Builder()
                 .add("action", "plot_load_chapters")
                 .add("manga_id", mangaId)
@@ -202,12 +202,16 @@ class PlotTwistNoFansub : HttpSource() {
                 POST("$baseUrl/wp-admin/admin-ajax.php", headers, form),
             ).execute().use { it.body.string() }
 
-            val apiData = apiResponse.parseAs<ChapterAjaxResponse>()
+            val apiData = try {
+                apiResponse.parseAs<ChapterAjaxResponse>()
+            } catch (e: Exception) {
+                break
+            }
 
-            if (apiData.data.html.isEmpty() || !apiData.data.hasMore) {
-                hasNextPage = false
-            } else {
-                val fragment = Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
+            // Always parse whatever HTML we got before checking has_more
+            val html = apiData.data.html
+            if (html.isNotEmpty()) {
+                val fragment = Jsoup.parseBodyFragment(html, baseUrl)
                 fragment.body().select("a.mn-detail-chapter-item").forEach { a ->
                     val url = a.attr("abs:href").ifEmpty { a.attr("href") }
                     if (url.isNotEmpty()) {
@@ -228,8 +232,10 @@ class PlotTwistNoFansub : HttpSource() {
                         )
                     }
                 }
-                page++
             }
+
+            hasMore = apiData.data.hasMore
+            page++
         }
 
         return chapters
