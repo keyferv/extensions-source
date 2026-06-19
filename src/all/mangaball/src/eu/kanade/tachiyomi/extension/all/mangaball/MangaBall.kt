@@ -50,22 +50,30 @@ class MangaBall(
             CookieInterceptor(domain, "show18PlusContent" to hideNsfwPreference().not().toString()),
         )
         .addInterceptor { chain ->
-            var request = chain.request()
-            if (request.url.pathSegments[0] == "api") {
-                request = request.newBuilder()
+            val request = chain.request()
+            val isImage = request.url.encodedPath.let {
+                it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") || it.endsWith(".webp")
+            }
+            if (isImage) {
+                // Force identity encoding to avoid malformed gzip from image server
+                val identityRequest = request.newBuilder()
+                    .header("Accept-Encoding", "identity")
+                    .build()
+                chain.proceed(identityRequest)
+            } else if (request.url.pathSegments[0] == "api") {
+                val apiRequest = request.newBuilder()
                     .header("X-Requested-With", "XMLHttpRequest")
                     .header("X-CSRF-TOKEN", getCSRF())
                     .build()
 
-                val response = chain.proceed(request)
+                val response = chain.proceed(apiRequest)
                 if (!response.isSuccessful && response.code == 403) {
                     response.close()
                     updateCSRF()
-                    request = request.newBuilder()
+                    val retry = apiRequest.newBuilder()
                         .header("X-CSRF-TOKEN", getCSRF())
                         .build()
-
-                    chain.proceed(request)
+                    chain.proceed(retry)
                 } else {
                     response
                 }
@@ -380,14 +388,22 @@ class MangaBall(
             updateViews(titleId, chapterId)
         }
 
+        // Try JS-based chapterImages first (legacy)
         val script = document.select("script:containsData(chapterImages)").joinToString(";") { it.data() }
         val images = imagesRegex.find(script)
             ?.groupValues?.get(1)
             ?.parseAs<List<String>>()
             .orEmpty()
 
-        return images.mapIndexed { idx, img ->
-            Page(idx, imageUrl = img)
+        if (images.isNotEmpty()) {
+            return images.mapIndexed { idx, img -> Page(idx, imageUrl = img) }
+        }
+
+        // Fall back to HTML img tags (current site layout)
+        return document.select("div.manga-page img").mapIndexed { idx, img ->
+            val url = img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
+                .takeIf { it.startsWith("http") } ?: ""
+            Page(idx, imageUrl = url)
         }
     }
 
