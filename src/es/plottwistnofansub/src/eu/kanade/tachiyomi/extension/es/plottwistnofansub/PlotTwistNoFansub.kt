@@ -166,14 +166,19 @@ class PlotTwistNoFansub : HttpSource() {
         val seenUrls = mutableSetOf<String>()
 
         // All chapters are loaded via AJAX (initial HTML has none)
-        var page = 1
+        // First request has no page param, then page=1, page=2, ...
+        var page = 0
         var hasMore = true
 
         while (hasMore) {
             val form = FormBody.Builder()
                 .add("action", "plot_load_chapters")
                 .add("manga_id", mangaId)
-                .add("page", page.toString())
+                .apply {
+                    if (page > 0) {
+                        add("page", page.toString())
+                    }
+                }
                 .build()
 
             val apiResponse = client.newCall(
