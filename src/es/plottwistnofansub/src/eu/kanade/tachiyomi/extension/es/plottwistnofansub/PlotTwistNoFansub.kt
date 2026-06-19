@@ -163,33 +163,11 @@ class PlotTwistNoFansub : HttpSource() {
             ?: throw Exception("No se pudo encontrar el ID del manga")
 
         val chapters = mutableListOf<SChapter>()
+        val seenUrls = mutableSetOf<String>()
 
-        // Initial chapters rendered in HTML (new theme: mn-detail-chapter-item)
-        document.select("a.mn-detail-chapter-item").forEach { a ->
-            val url = a.attr("abs:href").ifEmpty { a.attr("href") }
-            if (url.isNotEmpty()) {
-                val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
-                val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
-                val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
-                    ?.replace(HTML_TAG_REGEX, "")
-                    ?: ""
-                chapters.add(
-                    SChapter.create().apply {
-                        setUrlWithoutDomain(url)
-                        name = buildString {
-                            append("Capítulo $num")
-                            if (extend.isNotEmpty()) append(" - $extend")
-                        }
-                        date_upload = dateFormat.tryParse(dateText)
-                    },
-                )
-            }
-        }
-
-        // AJAX-loaded chapters via admin-ajax.php
-        // New endpoint: action=plot_load_chapters&manga_id=X&page=N
-        var page = 2
-        var hasMore = chapters.isNotEmpty()
+        // All chapters are loaded via AJAX (initial HTML has none)
+        var page = 1
+        var hasMore = true
 
         while (hasMore) {
             val form = FormBody.Builder()
@@ -208,13 +186,12 @@ class PlotTwistNoFansub : HttpSource() {
                 break
             }
 
-            // Always parse whatever HTML we got before checking has_more
             val html = apiData.data.html
             if (html.isNotEmpty()) {
                 val fragment = Jsoup.parseBodyFragment(html, baseUrl)
                 fragment.body().select("a.mn-detail-chapter-item").forEach { a ->
                     val url = a.attr("abs:href").ifEmpty { a.attr("href") }
-                    if (url.isNotEmpty()) {
+                    if (url.isNotEmpty() && seenUrls.add(url)) {
                         val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
                         val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
                         val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
