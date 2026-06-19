@@ -165,8 +165,12 @@ class PlotTwistNoFansub : HttpSource() {
         val chapters = mutableListOf<SChapter>()
         val seenUrls = mutableSetOf<String>()
 
-        // All chapters are loaded via AJAX (initial HTML has none)
-        // First request has no page param, then page=1, page=2, ...
+        // 1) Parse chapters from initial HTML (first + last chapters)
+        document.select("a.mn-detail-chapter-item").forEach { a ->
+            addChapter(a, chapters, seenUrls)
+        }
+
+        // 2) AJAX pagination: no page param, then page=1, page=2, ...
         var page = 0
         var hasMore = true
 
@@ -195,24 +199,7 @@ class PlotTwistNoFansub : HttpSource() {
             if (html.isNotEmpty()) {
                 val fragment = Jsoup.parseBodyFragment(html, baseUrl)
                 fragment.body().select("a.mn-detail-chapter-item").forEach { a ->
-                    val url = a.attr("abs:href").ifEmpty { a.attr("href") }
-                    if (url.isNotEmpty() && seenUrls.add(url)) {
-                        val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
-                        val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
-                        val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
-                            ?.replace(HTML_TAG_REGEX, "")
-                            ?: ""
-                        chapters.add(
-                            SChapter.create().apply {
-                                setUrlWithoutDomain(url)
-                                name = buildString {
-                                    append("Capítulo $num")
-                                    if (extend.isNotEmpty()) append(" - $extend")
-                                }
-                                date_upload = dateFormat.tryParse(dateText)
-                            },
-                        )
-                    }
+                    addChapter(a, chapters, seenUrls)
                 }
             }
 
@@ -221,6 +208,31 @@ class PlotTwistNoFansub : HttpSource() {
         }
 
         return chapters
+    }
+
+    private fun addChapter(
+        element: Element,
+        chapters: MutableList<SChapter>,
+        seenUrls: MutableSet<String>,
+    ) {
+        val url = element.attr("abs:href").ifEmpty { element.attr("href") }
+        if (url.isNotEmpty() && seenUrls.add(url)) {
+            val num = element.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
+            val extend = element.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
+            val dateText = element.selectFirst(".mn-detail-chapter-date")?.text()
+                ?.replace(HTML_TAG_REGEX, "")
+                ?: ""
+            chapters.add(
+                SChapter.create().apply {
+                    setUrlWithoutDomain(url)
+                    name = buildString {
+                        append("Capítulo $num")
+                        if (extend.isNotEmpty()) append(" - $extend")
+                    }
+                    date_upload = dateFormat.tryParse(dateText)
+                },
+            )
+        }
     }
 
     // =============================== Pages ================================
