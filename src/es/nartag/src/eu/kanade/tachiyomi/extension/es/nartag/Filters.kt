@@ -2,15 +2,17 @@ package eu.kanade.tachiyomi.extension.es.nartag
 
 import eu.kanade.tachiyomi.source.model.Filter
 
-class TypeFilter : Filter.Select<String>("Tipo", types)
+class TypeFilter : Filter.Select<String>("Tipo", arrayOf("Todos", "Manga", "Manhwa", "Manhua", "Other"))
 
-class StatusFilter : Filter.Select<String>("Estado", statuses)
+class StatusFilter : Filter.Select<String>("Estado", arrayOf("Todos", "Ongoing", "Completed", "Hiatus", "Cancelled"))
 
-class SortFilter : Filter.Select<String>("Ordenar", sortOptions.map { it.name }.toTypedArray())
+class SortFilter : Filter.Select<SortOption>("Ordenar por", sortOptions)
 
-class GenreFilter : Filter.Select<String>("Géneros", genres)
+class SortOption(val name: String, val value: String) {
+    override fun toString(): String = name
+}
 
-data class SortOption(val name: String, val value: String)
+class GenreFilter(genres: Array<String>) : Filter.Select<String>("Géneros", genres)
 
 val sortOptions = arrayOf(
     SortOption("Más reciente", "latest"),
@@ -20,11 +22,7 @@ val sortOptions = arrayOf(
     SortOption("A-Z", "title"),
 )
 
-val types = arrayOf("Todos", "Manga", "Manhwa", "Manhua", "Novel", "Other")
-
-val statuses = arrayOf("Todos", "Ongoing", "Completed", "Hiatus", "Cancelled")
-
-val genres = arrayOf(
+val genresList = arrayOf(
     "Todos",
     "Acción",
     "Adventure",
