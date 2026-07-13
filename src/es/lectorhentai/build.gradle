@@ -1,0 +1,10 @@
+ext {
+    extName = 'LectorHentai'
+    extClass = '.LectorHentai'
+    extVersionCode = 9
+    isNsfw = true
+}
+
+apply plugin: "kei.plugins.extension.legacy"
+
+// Usamos la configuración por defecto de common.gradle (res/)

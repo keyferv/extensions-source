@@ -105,13 +105,14 @@ class PayloadChapterDto(var data: List<ChapterDto>, val meta: MetaDto)
 
 @Serializable
 class ChapterDto(
-    private val id: Int,
-    private val name: String,
+    internal val id: Int,
+    internal val name: String,
     @SerialName("published_at") private val date: String,
 ) {
     fun toSChapter(mangaId: String, dateFormat: SimpleDateFormat) = SChapter.create().apply {
         name = "Capitulo ${this@ChapterDto.name}"
-        url = "$mangaId/$id"
+        url = "$mangaId/$name"
+        chapter_number = this@ChapterDto.name.toFloatOrNull() ?: -1f
         date_upload = try {
             dateFormat.parse(date)!!.time
         } catch (e: ParseException) {
@@ -128,6 +129,24 @@ class PayloadPagesDto(val chapter: PageDto)
 
 @Serializable
 class PageDto(val pages: List<String>)
+
+@Serializable
+class HomepageDto(
+    val data: HomepageDataDto,
+    val rankings: List<HomepageMangaDto>? = null,
+)
+
+@Serializable
+class HomepageDataDto(
+    @SerialName("new_chapters") val newChapters: List<HomepageMangaDto>? = null,
+)
+
+@Serializable
+class HomepageMangaDto(
+    val id: Int,
+    val slug: String,
+    val type: String? = null,
+)
 
 @Serializable
 class MangaStatusDto(

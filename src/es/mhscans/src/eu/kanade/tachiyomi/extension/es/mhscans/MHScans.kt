@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferences
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
@@ -29,11 +30,12 @@ class MHScans :
     override val mangaSubString = "series"
 
     override val client: OkHttpClient = super.client.newBuilder()
-        .rateLimit(1, 3.seconds)
+        .rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
         .build()
 
     override val useNewChapterEndpoint = true
     override val useLoadMoreRequest = LoadMoreStrategy.Always
+    override val sendViewCount = false
 
     private val preferences: SharedPreferences = getPreferences()
 

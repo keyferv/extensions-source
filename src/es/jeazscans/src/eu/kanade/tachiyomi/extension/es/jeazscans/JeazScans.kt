@@ -167,15 +167,16 @@ class JeazScans : HttpSource() {
             ".page-container img.protected-img, .reader-body img, .reading-content img",
         )
 
-        val htmlPages = imageElements.mapIndexed { index, element ->
+        val htmlPages = imageElements.mapNotNull { element ->
             val imageUrl = when {
+                element.hasAttr("data-verify") -> decodeVerifyToUrl(element.attr("data-verify"))
                 element.hasAttr("data-sec-src") -> element.attr("abs:data-sec-src")
                 element.hasAttr("data-src") -> element.attr("abs:data-src")
                 else -> element.attr("abs:src")
             }
 
-            Page(index, imageUrl = imageUrl)
-        }
+            imageUrl?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+        }.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
 
         if (htmlPages.isNotEmpty()) return htmlPages
 
