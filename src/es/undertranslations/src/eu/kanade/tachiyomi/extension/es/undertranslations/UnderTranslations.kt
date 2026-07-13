@@ -27,7 +27,7 @@ class UnderTranslations(
 
     override val supportsLatest = true
 
-    private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es", "MX"))
+    private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.of("es", "MX"))
 
     // ──── Headers ────
 
@@ -163,7 +163,7 @@ class UnderTranslations(
                 name = chapterName
                 url = link.attr("href").substringAfter(baseUrl).ifEmpty { "/" }
                 date_upload = parseChapterDate(dateSpan?.text())
-                chapter_number = (parseChapterNumber(chapterNum))
+                chapter_number = parseChapterNumber(chapterNum)
             }
         }.sortedByDescending { it.chapter_number }
     }
@@ -179,12 +179,12 @@ class UnderTranslations(
         }
     }
 
-    private fun parseChapterNumber(num: String): Double = try {
+    private fun parseChapterNumber(num: String): Float = try {
         num.replace("Capítulo ", "", ignoreCase = true)
             .trim()
-            .toDouble()
+            .toFloat()
     } catch (_: Exception) {
-        0.0
+        0f
     }
 
     // ──── Page List (Images) ────
