@@ -14,6 +14,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.getPreferencesLazy
@@ -33,15 +34,59 @@ import java.lang.UnsupportedOperationException
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class MangaBall(
-    override val lang: String,
-    private vararg val siteLang: String,
-) : HttpSource(),
+@Source
+abstract class MangaBall :
+    HttpSource(),
     ConfigurableSource {
 
-    override val name = "Manga Ball"
-    private val domain = "mangaball.net"
-    override val baseUrl = "https://$domain"
+    private val siteLang: List<String>
+        get() = when (lang) {
+            "ar" -> listOf("ar")
+            "bg" -> listOf("bg")
+            "bn" -> listOf("bn")
+            "ca" -> listOf("ca", "ca-ad", "ca-es", "ca-fr", "ca-it", "ca-pt")
+            "cs" -> listOf("cs")
+            "da" -> listOf("da")
+            "de" -> listOf("de")
+            "el" -> listOf("el")
+            "en" -> listOf("en")
+            "es" -> listOf("es", "es-ar", "es-mx", "es-es", "es-la", "es-419")
+            "fa" -> listOf("fa")
+            "fi" -> listOf("fi")
+            "fr" -> listOf("fr")
+            "he" -> listOf("he")
+            "hi" -> listOf("hi")
+            "hu" -> listOf("hu")
+            "id" -> listOf("id")
+            "it" -> listOf("it", "it-it")
+            "is" -> listOf("ib", "ib-is", "is")
+            "ja" -> listOf("jp")
+            "ko" -> listOf("kr")
+            "kn" -> listOf("kn", "kn-in", "kn-my", "kn-sg", "kn-tw")
+            "ml" -> listOf("ml", "ml-in", "ml-my", "ml-sg", "ml-tw")
+            "ms" -> listOf("ms")
+            "ne" -> listOf("ne")
+            "nl" -> listOf("nl", "nl-be")
+            "no" -> listOf("no")
+            "pl" -> listOf("pl")
+            "pt-BR" -> listOf("pt-br", "pt-pt")
+            "ro" -> listOf("ro")
+            "ru" -> listOf("ru")
+            "sk" -> listOf("sk")
+            "sl" -> listOf("sl")
+            "sq" -> listOf("sq")
+            "sr" -> listOf("sr", "sr-cyrl")
+            "sv" -> listOf("sv")
+            "ta" -> listOf("ta")
+            "th" -> listOf("th", "th-hk", "th-kh", "th-la", "th-my", "th-sg")
+            "tr" -> listOf("tr")
+            "uk" -> listOf("uk")
+            "vi" -> listOf("vi")
+            "zh" -> listOf("zh", "zh-cn", "zh-hk", "zh-mo", "zh-sg", "zh-tw")
+            else -> listOf(lang)
+        }
+
+    private val domain get() = baseUrl.removePrefix("https://")
     override val supportsLatest = true
     private val preferences by getPreferencesLazy()
 
@@ -50,30 +95,22 @@ class MangaBall(
             CookieInterceptor(domain, "show18PlusContent" to hideNsfwPreference().not().toString()),
         )
         .addInterceptor { chain ->
-            val request = chain.request()
-            val isImage = request.url.encodedPath.let {
-                it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") || it.endsWith(".webp")
-            }
-            if (isImage) {
-                // Force identity encoding to avoid malformed gzip from image server
-                val identityRequest = request.newBuilder()
-                    .header("Accept-Encoding", "identity")
-                    .build()
-                chain.proceed(identityRequest)
-            } else if (request.url.pathSegments[0] == "api") {
-                val apiRequest = request.newBuilder()
+            var request = chain.request()
+            if (request.url.pathSegments[0] == "api") {
+                request = request.newBuilder()
                     .header("X-Requested-With", "XMLHttpRequest")
                     .header("X-CSRF-TOKEN", getCSRF())
                     .build()
 
-                val response = chain.proceed(apiRequest)
+                val response = chain.proceed(request)
                 if (!response.isSuccessful && response.code == 403) {
                     response.close()
                     updateCSRF()
-                    val retry = apiRequest.newBuilder()
+                    request = request.newBuilder()
                         .header("X-CSRF-TOKEN", getCSRF())
                         .build()
-                    chain.proceed(retry)
+
+                    chain.proceed(request)
                 } else {
                     response
                 }
@@ -388,22 +425,14 @@ class MangaBall(
             updateViews(titleId, chapterId)
         }
 
-        // Try JS-based chapterImages first (legacy)
         val script = document.select("script:containsData(chapterImages)").joinToString(";") { it.data() }
         val images = imagesRegex.find(script)
             ?.groupValues?.get(1)
             ?.parseAs<List<String>>()
             .orEmpty()
 
-        if (images.isNotEmpty()) {
-            return images.mapIndexed { idx, img -> Page(idx, imageUrl = img) }
-        }
-
-        // Fall back to HTML img tags (current site layout)
-        return document.select("div.manga-page img").mapIndexed { idx, img ->
-            val url = img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
-                .takeIf { it.startsWith("http") } ?: ""
-            Page(idx, imageUrl = url)
+        return images.mapIndexed { idx, img ->
+            Page(idx, imageUrl = img)
         }
     }
 

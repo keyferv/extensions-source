@@ -29,13 +29,12 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.concurrent.thread
 
-abstract class HeanCms(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-    protected val apiUrl: String = baseUrl.replace("://", "://api."),
-) : HttpSource(),
+abstract class HeanCms :
+    HttpSource(),
     ConfigurableSource {
+
+    protected open val apiUrl: String
+        get() = baseUrl.replace("://", "://api.")
 
     protected val preferences: SharedPreferences by getPreferencesLazy()
 
@@ -131,11 +130,13 @@ abstract class HeanCms(
 
     override fun popularMangaParse(response: Response) = searchMangaParse(response)
 
+    protected open val latestSortBy = "desc"
+
     override fun latestUpdatesRequest(page: Int): Request {
         val url = "$apiUrl/query".toHttpUrl().newBuilder()
             .addQueryParameter("query_string", "")
             .addQueryParameter(if (useNewQueryEndpoint) "status" else "series_status", "All")
-            .addQueryParameter("order", "desc")
+            .addQueryParameter("order", latestSortBy)
             .addQueryParameter("orderBy", "latest")
             .addQueryParameter("series_type", "Comic")
             .addQueryParameter("page", page.toString())

@@ -6,9 +6,9 @@ class SortFilter :
     Filter.Sort(
         name = "Sort",
         values = sortOrders.map { it.first }.toTypedArray(),
-        state = Selection(1, false),
+        state = Selection(0, false),
     ) {
-    val sort get() = sortOrders[state?.index ?: 1].second
+    val sort get() = sortOrders[state?.index ?: 0].second
     val ascending get() = state?.ascending ?: false
 }
 
@@ -76,6 +76,18 @@ class GenreFilter(genreValues: List<String>, excluded: Set<String>) :
         state = genreValues.map { genre ->
             val state = if (genre in excluded) TriState.STATE_EXCLUDE else TriState.STATE_IGNORE
             TriStateFilter(genre, state = state)
+        },
+    ) {
+    val included get() = state.filter { it.isIncluded() }.map { it.value }
+    val excluded get() = state.filter { it.isExcluded() }.map { it.value }
+}
+
+class TagFilter(name: String, tagValues: List<String>, excluded: Set<String> = emptySet()) :
+    Filter.Group<TriStateFilter>(
+        name = name,
+        state = tagValues.map { tag ->
+            val state = if (tag in excluded) TriState.STATE_EXCLUDE else TriState.STATE_IGNORE
+            TriStateFilter(tag, state = state)
         },
     ) {
     val included get() = state.filter { it.isIncluded() }.map { it.value }

@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
@@ -17,19 +18,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
-class PlotTwistNoFansub : HttpSource() {
-
-    override val name = "Plot Twist No Fansub"
-
-    override val baseUrl = "https://plotnofansub.com"
-
-    override val lang = "es"
+@Source
+abstract class PlotTwistNoFansub : HttpSource() {
 
     override val supportsLatest = true
 
@@ -124,6 +119,7 @@ class PlotTwistNoFansub : HttpSource() {
                 ?: throw Exception("Manga title not found")
 
             thumbnail_url = document.selectFirst(".mn-detail-cover-frame img")?.imgAttr()
+                ?: document.selectFirst(".summary_image img")?.imgAttr()
 
             description = document.selectFirst(".mn-detail-synopsis")?.text()
                 ?: document.selectFirst(".summary__content")?.text()
@@ -137,13 +133,12 @@ class PlotTwistNoFansub : HttpSource() {
             val statusPill = document.selectFirst(".mn-detail-pill-value")?.text() ?: ""
             val statusClass = document.selectFirst(".mn-detail-pill-value")?.classNames()
                 ?.firstOrNull { it.startsWith("mn-st-") } ?: ""
-            val statusText = statusPill.lowercase(Locale.ROOT)
 
             status = when {
-                statusClass == "mn-st-emit" || statusText.contains("en emisión") || statusText.contains("en curso") -> SManga.ONGOING
-                statusClass == "mn-st-comp" || statusText.contains("finalizado") || statusText.contains("completado") -> SManga.COMPLETED
-                statusClass == "mn-st-cancel" || statusText.contains("cancelado") -> SManga.CANCELLED
-                statusClass == "mn-st-pause" || statusText.contains("en espera") -> SManga.ON_HIATUS
+                statusClass == "mn-st-emit" || statusPill.contains("en emisión", true) || statusPill.contains("en curso", true) -> SManga.ONGOING
+                statusClass == "mn-st-comp" || statusPill.contains("finalizado", true) || statusPill.contains("completado", true) -> SManga.COMPLETED
+                statusClass == "mn-st-cancel" || statusPill.contains("cancelado", true) -> SManga.CANCELLED
+                statusClass == "mn-st-pause" || statusPill.contains("en espera", true) -> SManga.ON_HIATUS
                 else -> SManga.UNKNOWN
             }
         }
@@ -162,66 +157,18 @@ class PlotTwistNoFansub : HttpSource() {
                 ?.let { OLD_MANGA_ID_REGEX.find(it)?.groupValues?.get(1) }
             ?: throw Exception("No se pudo encontrar el ID del manga")
 
-        val chapters = mutableListOf<SChapter>()
+        // Track URLs already seen to avoid duplicates between the HTML render
+        // and page=1 of the API (both return the same initial batch of chapters).
         val seenUrls = mutableSetOf<String>()
+        val chapters = mutableListOf<SChapter>()
 
-        // 1) Parse chapters from initial HTML (first + last chapters)
-        document.select("a.mn-detail-chapter-item").forEach { a ->
-            addChapter(a, chapters, seenUrls)
-        }
-
-        // 2) AJAX pagination: no page param, then page=1, page=2, ...
-        var page = 0
-        var hasMore = true
-
-        while (hasMore) {
-            val form = FormBody.Builder()
-                .add("action", "plot_load_chapters")
-                .add("manga_id", mangaId)
-                .apply {
-                    if (page > 0) {
-                        add("page", page.toString())
-                    }
-                }
-                .build()
-
-            val apiResponse = client.newCall(
-                POST("$baseUrl/wp-admin/admin-ajax.php", headers, form),
-            ).execute().use { it.body.string() }
-
-            val apiData = try {
-                apiResponse.parseAs<ChapterAjaxResponse>()
-            } catch (e: Exception) {
-                break
-            }
-
-            val html = apiData.data.html
-            if (html.isNotEmpty()) {
-                val fragment = Jsoup.parseBodyFragment(html, baseUrl)
-                fragment.body().select("a.mn-detail-chapter-item").forEach { a ->
-                    addChapter(a, chapters, seenUrls)
-                }
-            }
-
-            hasMore = apiData.data.hasMore
-            page++
-        }
-
-        return chapters
-    }
-
-    private fun addChapter(
-        element: Element,
-        chapters: MutableList<SChapter>,
-        seenUrls: MutableSet<String>,
-    ) {
-        val url = element.attr("abs:href").ifEmpty { element.attr("href") }
-        if (url.isNotEmpty() && seenUrls.add(url)) {
-            val num = element.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
-            val extend = element.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
-            val dateText = element.selectFirst(".mn-detail-chapter-date")?.text()
-                ?.replace(HTML_TAG_REGEX, "")
-                ?: ""
+        fun parseChapterElement(a: Element) {
+            val url = a.attr("abs:href").ifEmpty { a.attr("href") }
+            if (url.isEmpty() || !seenUrls.add(url)) return
+            val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
+            val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
+            val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
+                ?.replace(HTML_TAG_REGEX, "") ?: ""
             chapters.add(
                 SChapter.create().apply {
                     setUrlWithoutDomain(url)
@@ -233,12 +180,72 @@ class PlotTwistNoFansub : HttpSource() {
                 },
             )
         }
+
+        // Chapters rendered directly in the page HTML (first batch, most recent).
+        document.select("a.mn-detail-chapter-item").forEach { parseChapterElement(it) }
+
+        // Load remaining chapters via AJAX.
+        // The API page numbering starts at 1 and mirrors what the HTML already shows —
+        // seenUrls deduplication ensures we never add the same chapter twice.
+        var page = 1
+        var hasNextPage = true
+
+        while (hasNextPage) {
+            val form = FormBody.Builder()
+                .add("action", "plot_load_chapters")
+                .add("manga_id", mangaId)
+                .add("page", page.toString())
+                .build()
+
+            val rawJson = client.newCall(
+                POST("$baseUrl/wp-admin/admin-ajax.php", headers, form),
+            ).execute().use { it.body.string() }
+
+            val apiData = try {
+                rawJson.parseAs<ChapterAjaxResponse>()
+            } catch (e: Exception) {
+                break
+            }
+
+            if (apiData.data.html.isEmpty()) {
+                // Empty HTML — no more chapters.
+                break
+            }
+
+            val fragment = org.jsoup.Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
+            val newChapters = fragment.body().select("a.mn-detail-chapter-item")
+
+            if (newChapters.isEmpty()) {
+                // HTML came back but contained no chapter links — we're done.
+                break
+            }
+
+            newChapters.forEach { parseChapterElement(it) }
+
+            // Trust the server's has_more signal to decide whether to fetch the next page.
+            // The html.isEmpty() and newChapters.isEmpty() guards above already handle
+            // the case where the server is wrong, so we don't need extra logic here.
+            hasNextPage = apiData.data.hasMore
+            page++
+        }
+
+        return chapters
     }
 
     // =============================== Pages ================================
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("div.reading-content img").mapIndexed { i, img ->
+        return (
+            document.select("div.reading-content img").ifEmpty {
+                document.select("img.wp-manga-chapter-img")
+            }.ifEmpty {
+                document.select(".chapter-content img")
+            }.ifEmpty {
+                document.select("img.attachment-full")
+            }.ifEmpty {
+                document.select("div.pg-box img, div.page-break img")
+            }
+            ).mapIndexed { i, img ->
             Page(i, imageUrl = img.imgAttr())
         }
     }
