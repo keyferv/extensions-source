@@ -29,7 +29,8 @@ class UnderTranslations(
 
     override val supportsLatest = true
 
-    private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.of("es", "MX"))
+    @Suppress("DEPRECATION")
+    private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es", "MX"))
 
     private val json = Json { ignoreUnknownKeys = true }
 
