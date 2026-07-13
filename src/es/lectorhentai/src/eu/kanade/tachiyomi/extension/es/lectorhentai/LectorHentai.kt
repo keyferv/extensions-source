@@ -1,39 +1,52 @@
 package eu.kanade.tachiyomi.extension.es.lectorhentai
 
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.network.rateLimit
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import rx.Observable
 
-class LectorHentai : ParsedHttpSource() {
+class LectorHentai : HttpSource() {
     override val name = "LectorHentai"
     override val lang = "es"
     override val supportsLatest = true
     override val baseUrl = "https://lectorhentai.com"
 
-    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .rateLimitHost(baseUrl.toHttpUrl(), 2, 1)
+    override val client: OkHttpClient = network.client.newBuilder()
+        .rateLimit(2)
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
 
+    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
+
     // POPULARES
-    override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/${if (page > 1) "?page=$page" else ""}", headers)
+    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/${if (page > 1) "?page=$page" else ""}", headers)
 
-    override fun popularMangaSelector() = "div.bs.styletere"
+    private fun popularMangaSelector() = "div.bs.styletere"
 
-    override fun popularMangaFromElement(element: Element) = SManga.create().apply {
+    override fun popularMangaParse(response: Response): MangasPage {
+        val document = response.asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
+        return MangasPage(mangas, hasNextPage)
+    }
+
+    private fun popularMangaFromElement(element: Element) = SManga.create().apply {
         element.selectFirst("a[title]")?.let { link ->
             setUrlWithoutDomain(link.attr("href"))
             title = element.selectFirst("div.tt")?.text()?.trim() ?: link.attr("title")
@@ -49,18 +62,33 @@ class LectorHentai : ParsedHttpSource() {
         }
     }
 
-    override fun popularMangaNextPageSelector() = "a.r, a:contains(Siguiente)"
+    private fun popularMangaNextPageSelector() = "a.r, a:contains(Siguiente)"
 
     // RECIENTES
     override fun latestUpdatesRequest(page: Int) = popularMangaRequest(page)
 
-    override fun latestUpdatesSelector() = popularMangaSelector()
-
-    override fun latestUpdatesFromElement(element: Element) = popularMangaFromElement(element)
-
-    override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
+    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
 
     // BÚSQUEDA
+    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
+        val url = query.trim().toHttpUrlOrNull()
+        if (url != null && url.host.removePrefix("www.") == baseUrl.toHttpUrl().host) {
+            val path = url.encodedPath
+            if (path.startsWith("/manga/")) {
+                return Observable.just(MangasPage(listOf(createMangaFromPath(path)), false))
+            }
+        }
+
+        if (query.startsWith(PREFIX_ID_SEARCH)) {
+            val path = query.removePrefix(PREFIX_ID_SEARCH).let {
+                if (it.startsWith("/")) it else "/manga/$it"
+            }
+            return Observable.just(MangasPage(listOf(createMangaFromPath(path)), false))
+        }
+
+        return super.fetchSearchManga(page, query, filters)
+    }
+
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = "$baseUrl/tipo/all".toHttpUrl().newBuilder()
             .addQueryParameter("s", query)
@@ -84,14 +112,19 @@ class LectorHentai : ParsedHttpSource() {
         return GET(url.build(), headers)
     }
 
-    override fun searchMangaSelector() = popularMangaSelector()
+    override fun searchMangaParse(response: Response) = popularMangaParse(response)
 
-    override fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
-
-    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
+    private fun createMangaFromPath(path: String) = SManga.create().apply {
+        setUrlWithoutDomain(path)
+        title = path.trim('/').substringAfterLast('/')
+            .replace('-', ' ')
+            .replaceFirstChar { it.titlecase() }
+    }
 
     // DETALLES
-    override fun mangaDetailsParse(document: Document) = SManga.create().apply {
+    override fun mangaDetailsParse(response: Response): SManga = mangaDetailsParse(response.asJsoup())
+
+    private fun mangaDetailsParse(document: Document) = SManga.create().apply {
         document.selectFirst("div.infomanga, div.bigcontent")?.let { info ->
             title = info.selectFirst("h1.entry-title")?.text()
                 ?.replace("en Español | Leer Online Gratis", "")
@@ -104,9 +137,13 @@ class LectorHentai : ParsedHttpSource() {
     }
 
     // CAPÍTULOS
-    override fun chapterListSelector() = "div.releases a.leer, div.eplister li"
+    private fun chapterListSelector() = "div.releases a.leer, div.eplister li"
 
-    override fun chapterFromElement(element: Element) = SChapter.create().apply {
+    override fun chapterListParse(response: Response): List<SChapter> = response.asJsoup()
+        .select(chapterListSelector())
+        .map { chapterFromElement(it) }
+
+    private fun chapterFromElement(element: Element) = SChapter.create().apply {
         // Si es un botón "Leer Manga" (en la página de descripción)
         if (element.tagName() == "a" && element.hasClass("leer")) {
             setUrlWithoutDomain(element.attr("href"))
@@ -121,7 +158,9 @@ class LectorHentai : ParsedHttpSource() {
     }
 
     // PÁGINAS
-    override fun pageListParse(document: Document): List<Page> {
+    override fun pageListParse(response: Response): List<Page> = pageListParse(response.asJsoup())
+
+    private fun pageListParse(document: Document): List<Page> {
         val html = document.html()
 
         // Las imágenes están en un JSON dentro de ts_reader.run()
@@ -175,9 +214,6 @@ class LectorHentai : ParsedHttpSource() {
 
         return emptyList()
     }
-
-    override fun imageUrlParse(document: Document): String =
-        throw UnsupportedOperationException()
 
     // FILTROS
     private class GenreFilter(name: String) : Filter.CheckBox(name)

@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
@@ -22,13 +23,8 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
-class PlotTwistNoFansub : HttpSource() {
-
-    override val name = "Plot Twist No Fansub"
-
-    override val baseUrl = "https://plotnofansub.com"
-
-    override val lang = "es"
+@Source
+abstract class PlotTwistNoFansub : HttpSource() {
 
     override val supportsLatest = true
 
@@ -123,6 +119,7 @@ class PlotTwistNoFansub : HttpSource() {
                 ?: throw Exception("Manga title not found")
 
             thumbnail_url = document.selectFirst(".mn-detail-cover-frame img")?.imgAttr()
+                ?: document.selectFirst(".summary_image img")?.imgAttr()
 
             description = document.selectFirst(".mn-detail-synopsis")?.text()
                 ?: document.selectFirst(".summary__content")?.text()
@@ -160,34 +157,38 @@ class PlotTwistNoFansub : HttpSource() {
                 ?.let { OLD_MANGA_ID_REGEX.find(it)?.groupValues?.get(1) }
             ?: throw Exception("No se pudo encontrar el ID del manga")
 
+        // Track URLs already seen to avoid duplicates between the HTML render
+        // and page=1 of the API (both return the same initial batch of chapters).
+        val seenUrls = mutableSetOf<String>()
         val chapters = mutableListOf<SChapter>()
 
-        // Initial chapters rendered in HTML (new theme: mn-detail-chapter-item)
-        document.select("a.mn-detail-chapter-item").forEach { a ->
+        fun parseChapterElement(a: Element) {
             val url = a.attr("abs:href").ifEmpty { a.attr("href") }
-            if (url.isNotEmpty()) {
-                val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
-                val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
-                val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
-                    ?.replace(HTML_TAG_REGEX, "")
-                    ?: ""
-                chapters.add(
-                    SChapter.create().apply {
-                        setUrlWithoutDomain(url.substringAfter(baseUrl))
-                        name = buildString {
-                            append("Capítulo $num")
-                            if (extend.isNotEmpty()) append(" - $extend")
-                        }
-                        date_upload = dateFormat.tryParse(dateText)
-                    },
-                )
-            }
+            if (url.isEmpty() || !seenUrls.add(url)) return
+            val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
+            val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
+            val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
+                ?.replace(HTML_TAG_REGEX, "") ?: ""
+            chapters.add(
+                SChapter.create().apply {
+                    setUrlWithoutDomain(url)
+                    name = buildString {
+                        append("Capítulo $num")
+                        if (extend.isNotEmpty()) append(" - $extend")
+                    }
+                    date_upload = dateFormat.tryParse(dateText)
+                },
+            )
         }
 
-        // AJAX-loaded chapters via admin-ajax.php
-        // New endpoint: action=plot_load_chapters&manga_id=X&page=N
-        var page = 2
-        var hasNextPage = chapters.isNotEmpty()
+        // Chapters rendered directly in the page HTML (first batch, most recent).
+        document.select("a.mn-detail-chapter-item").forEach { parseChapterElement(it) }
+
+        // Load remaining chapters via AJAX.
+        // The API page numbering starts at 1 and mirrors what the HTML already shows —
+        // seenUrls deduplication ensures we never add the same chapter twice.
+        var page = 1
+        var hasNextPage = true
 
         while (hasNextPage) {
             val form = FormBody.Builder()
@@ -196,38 +197,36 @@ class PlotTwistNoFansub : HttpSource() {
                 .add("page", page.toString())
                 .build()
 
-            val apiResponse = client.newCall(
+            val rawJson = client.newCall(
                 POST("$baseUrl/wp-admin/admin-ajax.php", headers, form),
             ).execute().use { it.body.string() }
 
-            val apiData = apiResponse.parseAs<ChapterAjaxResponse>()
-
-            if (apiData.data.html.isEmpty() || !apiData.data.hasMore) {
-                hasNextPage = false
-            } else {
-                val fragment = org.jsoup.Jsoup.parseBodyFragment(apiData.data.html)
-                fragment.body().select("a.mn-detail-chapter-item").forEach { a ->
-                    val url = a.attr("abs:href").ifEmpty { a.attr("href") }
-                    if (url.isNotEmpty()) {
-                        val num = a.selectFirst(".mn-detail-chapter-name")?.text() ?: ""
-                        val extend = a.selectFirst(".mn-detail-chapter-extend")?.text() ?: ""
-                        val dateText = a.selectFirst(".mn-detail-chapter-date")?.text()
-                            ?.replace(HTML_TAG_REGEX, "")
-                            ?: ""
-                        chapters.add(
-                            SChapter.create().apply {
-                                setUrlWithoutDomain(url.substringAfter(baseUrl))
-                                name = buildString {
-                                    append("Capítulo $num")
-                                    if (extend.isNotEmpty()) append(" - $extend")
-                                }
-                                date_upload = dateFormat.tryParse(dateText)
-                            },
-                        )
-                    }
-                }
-                page++
+            val apiData = try {
+                rawJson.parseAs<ChapterAjaxResponse>()
+            } catch (e: Exception) {
+                break
             }
+
+            if (apiData.data.html.isEmpty()) {
+                // Empty HTML — no more chapters.
+                break
+            }
+
+            val fragment = org.jsoup.Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
+            val newChapters = fragment.body().select("a.mn-detail-chapter-item")
+
+            if (newChapters.isEmpty()) {
+                // HTML came back but contained no chapter links — we're done.
+                break
+            }
+
+            newChapters.forEach { parseChapterElement(it) }
+
+            // Trust the server's has_more signal to decide whether to fetch the next page.
+            // The html.isEmpty() and newChapters.isEmpty() guards above already handle
+            // the case where the server is wrong, so we don't need extra logic here.
+            hasNextPage = apiData.data.hasMore
+            page++
         }
 
         return chapters
@@ -236,7 +235,17 @@ class PlotTwistNoFansub : HttpSource() {
     // =============================== Pages ================================
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("div.pg-box img, div.page-break img").mapIndexed { i, img ->
+        return (
+            document.select("div.reading-content img").ifEmpty {
+                document.select("img.wp-manga-chapter-img")
+            }.ifEmpty {
+                document.select(".chapter-content img")
+            }.ifEmpty {
+                document.select("img.attachment-full")
+            }.ifEmpty {
+                document.select("div.pg-box img, div.page-break img")
+            }
+            ).mapIndexed { i, img ->
             Page(i, imageUrl = img.imgAttr())
         }
     }

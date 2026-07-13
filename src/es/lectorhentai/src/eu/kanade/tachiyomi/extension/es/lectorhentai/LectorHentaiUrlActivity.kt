@@ -10,13 +10,13 @@ import kotlin.system.exitProcess
 class LectorHentaiUrlActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val pathSegments = intent?.data?.pathSegments
-        if (pathSegments != null && pathSegments.size > 1) {
-            val item = pathSegments[1]
+        val intentData = intent?.data?.toString()
+        if (intentData != null) {
             val mainIntent = Intent().apply {
                 action = "eu.kanade.tachiyomi.SEARCH"
-                putExtra("query", "${LectorHentai.PREFIX_ID_SEARCH}$item")
+                putExtra("query", intentData)
                 putExtra("filter", packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
             try {
@@ -30,9 +30,5 @@ class LectorHentaiUrlActivity : Activity() {
 
         finish()
         exitProcess(0)
-    }
-
-    companion object {
-        private const val PREFIX_ID_SEARCH = "id:"
     }
 }

@@ -1,8 +1,7 @@
 ext {
     extName = 'Jeaz Scans'
     extClass = '.JeazScans'
-    baseUrl = 'https://lectorhub.j5z.xyz'
-    extVersionCode = 67
+    extVersionCode = 68
     isNsfw = false
 }
 

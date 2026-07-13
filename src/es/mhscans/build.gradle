@@ -3,8 +3,7 @@ ext {
     extClass = '.MHScans'
     themePkg = 'madara'
     baseUrl = 'https://mhscans.com'
-
-    overrideVersionCode = 13
+    overrideVersionCode = 15
     isNsfw = false
 }
 

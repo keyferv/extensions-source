@@ -1,46 +1,34 @@
 package eu.kanade.tachiyomi.extension.vi.hentaicube
 
 import android.content.SharedPreferences
-import android.text.Editable
-import android.text.TextWatcher
-import android.widget.Button
-import androidx.preference.EditTextPreference
-import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
 import rx.Observable
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class HentaiCB :
-    Madara(
-        "CBHentai",
-        "https://2tencb.pro",
-        "vi",
-        SimpleDateFormat("dd/MM/yyyy", Locale("vi")),
-    ),
-    ConfigurableSource {
-
-    override val id: Long = 823638192569572166
+@Source
+abstract class HentaiCB : Madara() {
+    override val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale("vi"))
 
     override val client: OkHttpClient = network.client.newBuilder()
         .followRedirects(false)
@@ -77,23 +65,6 @@ class HentaiCB :
 
     private val preferences: SharedPreferences = getPreferences()
     private val prefsLock = Any()
-
-    init {
-        preferences.getString(DEFAULT_BASE_URL_PREF, null).let { prefDefaultBaseUrl ->
-            if (prefDefaultBaseUrl != super.baseUrl) {
-                preferences.edit()
-                    .putString(BASE_URL_PREF, super.baseUrl)
-                    .putString(DEFAULT_BASE_URL_PREF, super.baseUrl)
-                    .apply()
-            }
-        }
-    }
-    private fun getPrefBaseUrl(): String = synchronized(prefsLock) {
-        preferences.getString(BASE_URL_PREF, super.baseUrl)!!
-    }
-
-    override val baseUrl: String
-        get() = getPrefBaseUrl().ifBlank { super.baseUrl }
 
     override val filterNonMangaItems = false
 
@@ -137,7 +108,7 @@ class HentaiCB :
         return super.fetchSearchManga(page, queryFixed, filters)
     }
 
-    private val oldMangaUrlRegex = Regex("^$baseUrl/\\w+/")
+    private val oldMangaUrlRegex by lazy { Regex("^$baseUrl/\\w+/") }
 
     // Change old entries from mangaSubString
     override fun getMangaUrl(manga: SManga): String = super.getMangaUrl(manga)
@@ -195,81 +166,92 @@ class HentaiCB :
         return request.newBuilder().url(url).build()
     }
 
-    override fun pageListParse(document: Document): List<Page> {
-        document.selectFirst("#manga-secure-reader")
-            ?: return super.pageListParse(document).distinctBy { it.imageUrl }
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
+        fetchPageListApi(chapter)
+    }
 
-        val chapterUrl = document.location()
-        val apiHeaders = headers.newBuilder()
-            .set("Referer", chapterUrl)
-            .set("Accept", "application/json")
+    private fun fetchPageListApi(chapter: SChapter): List<Page> {
+        val chapterUrl = chapter.url
+        val originUrl = chapterUrl.toHttpUrl().newBuilder()
+            .scheme("https")
+            .host(baseUrl.toHttpUrl().host)
+            .encodedPath("/")
             .build()
-        val images = client.newCall(GET("$baseUrl/wp-json/manga-reader/v1/images", apiHeaders)).execute()
-            .parseAs<SecureReaderDto>()
-            .images
 
-        return images.mapIndexed { index, imageUrl ->
-            Page(index, chapterUrl, imageUrl)
+        // Build cookies string with cf_clearance from cookie jar
+        val cookies = client.cookieJar.loadForRequest(originUrl)
+            .joinToString("; ") { "${it.name}=${it.value}" }
+
+        val referer = chapterUrl
+
+        // Step 1: Fetch chapter HTML to extract MASR2 token from data-masr2-token attribute
+        val chapterRequest = Request.Builder()
+            .url(chapterUrl)
+            .header("Cookie", cookies)
+            .build()
+        val chapterResponse = client.newCall(chapterRequest).execute()
+        val document = chapterResponse.asJsoup()
+        val masr2Token = document.selectFirst("#manga-secure-reader")
+            ?.attr("data-masr2-token")
+            ?: throw Exception("MASR2 token not found")
+
+        // Step 2: Generate a client ID (hex string like the JS reader does)
+        val clientId = generateClientId()
+
+        // Step 3: Paginate images using MASR2 v2 protocol
+        var token: String? = masr2Token
+        val allImages = mutableListOf<String>()
+
+        while (!token.isNullOrEmpty()) {
+            val pagesUrl = baseUrl.toHttpUrl().newBuilder()
+                .addPathSegments("wp-json/manga-reader/v2/pages")
+                .addQueryParameter("token", token)
+                .addQueryParameter("cid", clientId)
+                .build()
+
+            val pagesRequest = Request.Builder()
+                .url(pagesUrl)
+                .header("Accept", "application/json")
+                .header("Referer", referer)
+                .header("Cookie", cookies)
+                .build()
+
+            val pagesResponse = client.newCall(pagesRequest).execute()
+            val pages = pagesResponse.parseAs<PagesResponse>()
+
+            if (pages.items.isEmpty()) break
+
+            allImages += pages.items
+
+            token = if (pages.done) null else pages.nextToken
+        }
+
+        return allImages.mapIndexed { i, imageUrl ->
+            Page(i, chapterUrl, imageUrl)
         }
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = BASE_URL_PREF
-            title = BASE_URL_PREF_TITLE
-            summary = "$BASE_URL_PREF_SUMMARY${getPrefBaseUrl()}"
-            setDefaultValue(super.baseUrl)
-            dialogTitle = BASE_URL_PREF_TITLE
-            dialogMessage = "Default: ${super.baseUrl}"
-
-            val validate = { str: String ->
-                if (str.isBlank()) {
-                    true
-                } else {
-                    runCatching { str.toHttpUrl() }.isSuccess && domainRegex.matchEntire(str) != null
-                }
-            }
-
-            setOnBindEditTextListener { editText ->
-                editText.addTextChangedListener(
-                    object : TextWatcher {
-                        override fun beforeTextChanged(p0: CharSequence?, p1: Int, p2: Int, p3: Int) {}
-                        override fun onTextChanged(p0: CharSequence?, p1: Int, p2: Int, p3: Int) {}
-
-                        override fun afterTextChanged(editable: Editable?) {
-                            editable ?: return
-                            val text = editable.toString()
-                            val valid = validate(text)
-                            editText.error = if (!valid) "https://example.com" else null
-                            editText.rootView.findViewById<Button>(android.R.id.button1)?.isEnabled = editText.error == null
-                        }
-                    },
-                )
-            }
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val isValid = validate(newValue as String)
-                if (isValid) {
-                    summary = "$BASE_URL_PREF_SUMMARY$newValue"
-                }
-                isValid
-            }
-        }.let(screen::addPreference)
+    private fun generateClientId(): String {
+        val random = java.security.SecureRandom()
+        val bytes = ByteArray(16)
+        random.nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    @Serializable
-    class SecureReaderDto(
-        val images: List<String>,
-    )
+    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
     companion object {
-        private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
-        private const val BASE_URL_PREF_TITLE = "Ghi đè URL cơ sở"
         private const val BASE_URL_PREF = "overrideBaseUrl"
-        private const val BASE_URL_PREF_SUMMARY =
-            "Dành cho sử dụng tạm thời, cập nhật tiện ích sẽ xóa cài đặt.\n" +
-                "Để trống để sử dụng URL mặc định.\n" +
-                "Hiện tại sử dụng: "
-        private val domainRegex = Regex("""^https?://(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9]{1,6}$""")
     }
 }
+
+@Serializable
+private class PagesResponse(
+    val items: List<String>,
+    val done: Boolean,
+    val protocol: Int = 0,
+    val cursor: Int = 0,
+    @SerialName("next_cursor") val nextCursor: Int = 0,
+    val count: Int = 0,
+    @SerialName("next_token") val nextToken: String? = null,
+)

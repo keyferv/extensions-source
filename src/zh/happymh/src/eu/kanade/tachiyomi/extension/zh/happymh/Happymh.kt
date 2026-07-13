@@ -3,11 +3,6 @@ package eu.kanade.tachiyomi.extension.zh.happymh
 import android.widget.Toast
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.extension.zh.happymh.ChapterByPageResponse
-import eu.kanade.tachiyomi.extension.zh.happymh.ChapterByPageResponseData
-import eu.kanade.tachiyomi.extension.zh.happymh.Decoder
-import eu.kanade.tachiyomi.extension.zh.happymh.PageListResponseDto
-import eu.kanade.tachiyomi.extension.zh.happymh.PopularResponseDto
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -18,9 +13,9 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.Json
 import okhttp3.Cookie
 import okhttp3.FormBody
 import okhttp3.Headers
@@ -32,22 +27,16 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import rx.Observable
-import uy.kohesive.injekt.injectLazy
 
 const val PREF_KEY_CUSTOM_UA = "pref_key_custom_ua_"
 
-class Happymh :
+@Source
+abstract class Happymh :
     HttpSource(),
     ConfigurableSource {
-    override val name: String = "嗨皮漫画"
-    override val lang: String = "zh"
     override val supportsLatest: Boolean = true
 
-    override val baseUrl: String = "https://m.happymh.com"
-    private val json: Json by injectLazy()
-
     private val preferences = getPreferences()
-
     private val decoder = Decoder()
 
     init {

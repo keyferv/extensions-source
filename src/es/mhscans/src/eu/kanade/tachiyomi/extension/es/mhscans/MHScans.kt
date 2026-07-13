@@ -1,22 +1,23 @@
 package eu.kanade.tachiyomi.extension.es.mhscans
 
-import android.app.Application
 import android.content.SharedPreferences
 import android.widget.Toast
-import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.multisrc.madara.Madara
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Interceptor
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.network.rateLimit
+import keiyoushi.utils.getPreferences
+import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Response
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
+import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
 import java.util.Locale
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
 
 class MHScans :
     Madara(
@@ -26,68 +27,64 @@ class MHScans :
         dateFormat = SimpleDateFormat("dd 'de' MMMM 'de' yyyy", Locale("es")),
     ),
     ConfigurableSource {
+    override val mangaSubString = "series"
+
     override val client: OkHttpClient = super.client.newBuilder()
-        .rateLimit(3, 1, TimeUnit.SECONDS)
-        .addInterceptor(::imageRetryInterceptor)
+        .rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
         .build()
-
-    private fun imageRetryInterceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val response = chain.proceed(request)
-        if (response.isSuccessful || !request.url.host.contains("wsrv.nl")) return response
-        response.close()
-        var retries = 0
-        while (retries < MAX_RETRIES) {
-            retries++
-            Thread.sleep(RETRY_DELAY_MS)
-            val retryResponse = chain.proceed(request)
-            if (retryResponse.isSuccessful) return retryResponse
-            retryResponse.close()
-        }
-        return chain.proceed(request)
-    }
-
-    override fun processThumbnail(url: String?, fromSearch: Boolean): String? {
-        if (url == null) return null
-        val parsed = url.toHttpUrlOrNull() ?: return url
-        if (!parsed.host.contains("wsrv.nl")) return url
-        return parsed.newBuilder()
-            .setQueryParameter("output", "webp")
-            .setQueryParameter("q", "80")
-            .setQueryParameter("default", "1")
-            .build()
-            .toString()
-    }
 
     override val useNewChapterEndpoint = true
     override val useLoadMoreRequest = LoadMoreStrategy.Always
+    override val sendViewCount = false
 
-    private val defaultBaseUrl = "https://mhscans.com"
-    private val preferences: SharedPreferences by lazy {
-        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    private val preferences: SharedPreferences = getPreferences()
+
+    override fun chapterListSelector(): String {
+        val baseSelector = super.chapterListSelector()
+        val removePremium = preferences.getBoolean(REMOVE_PREMIUM_CHAPTERS, REMOVE_PREMIUM_CHAPTERS_DEFAULT)
+
+        if (!removePremium) {
+            return baseSelector
+        }
+
+        return "$baseSelector:not(.premium)"
     }
 
-    override val baseUrl: String
-        get() = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
+    override fun pageListParse(document: Document): List<Page> {
+        super.pageListParse(document).also {
+            if (it.isNotEmpty()) return it
+        }
+
+        document.selectFirst("form#rk_madara_redirect[method=post]")?.let { form ->
+            val url = form.attr("action")
+            val headers = headersBuilder().set("Referer", document.location()).build()
+            val body = FormBody.Builder()
+            form.select("input").forEach {
+                body.add(it.attr("name"), it.attr("value"))
+            }
+            return pageListParse(client.newCall(POST(url, headers, body.build())).execute().asJsoup())
+        }
+
+        return document.select("div.rk-page-wrap img, img.rk-img").mapIndexed { i, img ->
+            Page(i, imageUrl = img.attr("abs:src").ifEmpty { img.attr("abs:data-src") })
+        }
+    }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = BASE_URL_PREF
-            title = "Editar URL de la fuente"
-            summary = "Para uso temporal, si la extensión se actualiza se perderá el cambio."
-            dialogTitle = "Editar URL de la fuente"
-            dialogMessage = "URL por defecto:\n$defaultBaseUrl"
-            setDefaultValue(defaultBaseUrl)
+        SwitchPreferenceCompat(screen.context).apply {
+            key = REMOVE_PREMIUM_CHAPTERS
+            title = "Filtrar capítulos de pago"
+            summary = "Oculta automáticamente los capítulos que requieren Taels."
+            setDefaultValue(REMOVE_PREMIUM_CHAPTERS_DEFAULT)
             setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, "Reinicie la aplicación para aplicar los cambios", Toast.LENGTH_LONG).show()
+                Toast.makeText(screen.context, "Para aplicar los cambios, actualiza la lista de capítulos", Toast.LENGTH_LONG).show()
                 true
             }
         }.also { screen.addPreference(it) }
     }
 
     companion object {
-        private const val BASE_URL_PREF = "overrideBaseUrl"
-        private const val MAX_RETRIES = 2
-        private const val RETRY_DELAY_MS = 1000L
+        private const val REMOVE_PREMIUM_CHAPTERS = "removePremiumChapters"
+        private const val REMOVE_PREMIUM_CHAPTERS_DEFAULT = true
     }
 }
