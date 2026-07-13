@@ -15,16 +15,19 @@ import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
-import java.util.Calendar
 import java.util.Locale
 
-class JeazScans : HttpSource() {
+class JeazScans :
+    Madara(
+        "Jeaz Scans",
+        "https://lectorhub.j5z.xyz",
+        "es",
+        dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale("es")),
+    ) {
+    override val id = 5292079548510508306
 
-    override val name = "Jeaz Scans"
+    override val useNewChapterEndpoint = true
 
     override val baseUrl = "https://lectorhub.j5z.xyz"
 
