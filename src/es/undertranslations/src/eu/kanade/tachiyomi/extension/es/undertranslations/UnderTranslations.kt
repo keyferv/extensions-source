@@ -9,6 +9,8 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -28,6 +30,8 @@ class UnderTranslations(
     override val supportsLatest = true
 
     private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.of("es", "MX"))
+
+    private val json = Json { ignoreUnknownKeys = true }
 
     // ──── Headers ────
 
@@ -192,16 +196,33 @@ class UnderTranslations(
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
 
     override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        val images = document.select("#readerarea img.ts-main-image")
+        val body = response.body.string()
 
-        return images.mapIndexed { index, img ->
-            val url = img.attr("abs:src").ifBlank {
-                img.attr("abs:data-src")
-            }
-            Page(index, imageUrl = url)
-        }
+        // Images are loaded via JavaScript: ts_reader.run({...})
+        val scriptMatch = TS_READER_REGEX.find(body)
+            ?: return emptyList()
+
+        val readerData = json.decodeFromString<TsReaderData>(scriptMatch.groupValues[1])
+        val images = readerData.sources.firstOrNull()?.images ?: emptyList()
+
+        return images.mapIndexed { index, url -> Page(index, imageUrl = url) }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+
+    companion object {
+        private val TS_READER_REGEX = Regex("""ts_reader\.run\((\{.*?})\s*\)""")
+    }
+
+    // ──── DTOs ────
+
+    @Serializable
+    data class TsReaderData(
+        val sources: List<TsReaderSource> = emptyList(),
+    )
+
+    @Serializable
+    data class TsReaderSource(
+        val images: List<String> = emptyList(),
+    )
 }
