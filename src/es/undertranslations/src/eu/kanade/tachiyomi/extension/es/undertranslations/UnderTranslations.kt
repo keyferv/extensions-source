@@ -9,8 +9,6 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -31,8 +29,6 @@ class UnderTranslations(
 
     @Suppress("DEPRECATION")
     private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es", "MX"))
-
-    private val json = Json { ignoreUnknownKeys = true }
 
     // ──── Headers ────
 
@@ -199,12 +195,15 @@ class UnderTranslations(
     override fun pageListParse(response: Response): List<Page> {
         val body = response.body.string()
 
-        // Images are loaded via JavaScript: ts_reader.run({...})
-        val scriptMatch = TS_READER_REGEX.find(body)
+        // Reader images are injected by ts_reader.run({...}) into an empty #readerarea.
+        val imagesBlock = IMAGES_ARRAY_REGEX.find(body)
+            ?.groupValues
+            ?.getOrNull(1)
             ?: return emptyList()
 
-        val readerData = json.decodeFromString<TsReaderData>(scriptMatch.groupValues[1])
-        val images = readerData.sources.firstOrNull()?.images ?: emptyList()
+        val images = IMAGE_URL_REGEX.findAll(imagesBlock)
+            .map { match -> match.groupValues[1].replace("\\/", "/") }
+            .toList()
 
         return images.mapIndexed { index, url -> Page(index, imageUrl = url) }
     }
@@ -212,18 +211,10 @@ class UnderTranslations(
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     companion object {
-        private val TS_READER_REGEX = Regex("""ts_reader\.run\((\{.*?})\s*\)""")
+        private val IMAGES_ARRAY_REGEX = Regex(
+            "\"images\"\\s*:\\s*\\[(.*?)]",
+            setOf(RegexOption.DOT_MATCHES_ALL),
+        )
+        private val IMAGE_URL_REGEX = Regex("\"(https?:\\\\/\\\\/[^\"]+|https?://[^\"]+)\"")
     }
-
-    // ──── DTOs ────
-
-    @Serializable
-    data class TsReaderData(
-        val sources: List<TsReaderSource> = emptyList(),
-    )
-
-    @Serializable
-    data class TsReaderSource(
-        val images: List<String> = emptyList(),
-    )
 }
