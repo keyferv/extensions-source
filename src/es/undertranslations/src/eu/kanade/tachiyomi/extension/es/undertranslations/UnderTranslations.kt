@@ -110,19 +110,22 @@ class UnderTranslations(
 
             thumbnail_url = document.selectFirst(".thumb img[src]")?.attr("abs:src")
 
-            description = document.selectFirst(".info-desc .wd-full")?.let { full ->
-                full.select("p").joinToString("\n") { it.text() }.ifBlank { full.text() }
-            }
+            description = document.select(".info-desc .wd-full")
+                .firstOrNull { it.select(".entry-content").isNotEmpty() }
+                ?.select(".entry-content p")
+                ?.joinToString("\n") { it.text() }
 
-            // Parse status from the status label
+            // Parse status (no status element found on this site)
             status = parseStatus(document.selectFirst(".spe span")?.text())
 
             // Genres
             genre = document.select(".mgen a")
                 .joinToString(", ") { it.text() }
 
-            author = document.selectFirst(".infotable tr:contains(Autor) td:last-child, " +
-                ".infotable tr:contains(autor) td:last-child")?.text()
+            author = document.selectFirst(
+                ".infotable tr:contains(Autor) td:last-child, " +
+                    ".infotable tr:contains(autor) td:last-child",
+            )?.text()
                 ?: document.selectFirst("td:contains(Autor) + td")?.text()
                 ?: "Desconocido"
         }
@@ -160,7 +163,7 @@ class UnderTranslations(
                 name = chapterName
                 url = link.attr("href").substringAfter(baseUrl).ifEmpty { "/" }
                 date_upload = parseChapterDate(dateSpan?.text())
-                chapter_number = parseChapterNumber(chapterNum)
+                chapter_number = (parseChapterNumber(chapterNum))
             }
         }.sortedByDescending { it.chapter_number }
     }
@@ -176,19 +179,17 @@ class UnderTranslations(
         }
     }
 
-    private fun parseChapterNumber(num: String): Float {
-        return try {
-            num.replace("Capítulo ", "", ignoreCase = true)
-                .trim()
-                .toFloat()
-        } catch (_: Exception) {
-            0f
-        }
+    private fun parseChapterNumber(num: String): Double = try {
+        num.replace("Capítulo ", "", ignoreCase = true)
+            .trim()
+            .toDouble()
+    } catch (_: Exception) {
+        0.0
     }
 
     // ──── Page List (Images) ────
 
-    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl${chapter.url}", headers)
+    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
