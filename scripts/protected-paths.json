@@ -2,7 +2,7 @@
   "_meta": {
     "description": "Extensions protected during upstream sync. Single source of truth.",
     "engramTopicKey": "workflow/upstream-sync-protect-list",
-    "lastReviewed": "2026-06-13"
+    "lastReviewed": "2026-07-13"
   },
   "paths": [
     {
@@ -38,12 +38,56 @@
       "note": "Local version maintained"
     },
     {
-      "path": "src/es/plottwistnofansub",
-      "note": "Minor tweak in animebbg commit"
-    },
-    {
       "path": "src/es/rncalation",
       "note": "New extension for rncalation.online (Knight No Scanlation + Traducciones Amistosas merge)"
+    },
+    {
+      "path": "src/es/mantrazscan",
+      "note": "Local custom source migrated to current Mantraz Scan Next.js site"
+    },
+    {
+      "path": "src/es/emperorscan",
+      "note": "Local custom source patched for current ImperioManhua layout and chapters data"
+    },
+    {
+      "path": "src/es/mangalect",
+      "note": "Local custom source for mangalect.org"
+    },
+    {
+      "path": "src/es/aquellosquetraducen",
+      "note": "Local custom source backed by Firestore and Google Drive"
+    },
+    {
+      "path": "src/es/undertranslations",
+      "note": "Local custom source for undertranslations.com"
+    },
+    {
+      "path": "src/es/mangatab",
+      "note": "Local custom source added in this fork"
+    },
+    {
+      "path": "src/es/tojimangas",
+      "note": "Local custom source for tojimangas.com"
+    },
+    {
+      "path": "src/es/zonatmo",
+      "note": "Local custom source for zonatmo.org"
+    },
+    {
+      "path": "src/es/zonatmonet",
+      "note": "Local custom source for ZonaTMO.NET"
+    },
+    {
+      "path": "src/es/visorcapitulo",
+      "note": "Local custom source for visorcapitulo.com"
+    },
+    {
+      "path": "src/es/ritto",
+      "note": "Local custom source for ritto.cc"
+    },
+    {
+      "path": "src/es/komiwa",
+      "note": "Local custom source for komiwa.lat"
     }
   ]
 }
