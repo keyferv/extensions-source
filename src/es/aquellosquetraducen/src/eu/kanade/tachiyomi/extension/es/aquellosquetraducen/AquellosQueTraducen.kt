@@ -39,6 +39,9 @@ class AquellosQueTraducen(
     private val driveApiKey: String
         get() = preferences.getString(DRIVE_API_KEY_PREF, "").orEmpty().trim()
 
+    @Volatile
+    private var cachedDriveApiKey: String? = null
+
     private val json = Json { ignoreUnknownKeys = true }
 
     override fun headersBuilder() = super.headersBuilder()
@@ -185,11 +188,20 @@ class AquellosQueTraducen(
     }
 
     private fun requireDriveApiKey(): String {
-        val key = driveApiKey
+        val key = driveApiKey.ifBlank { cachedDriveApiKey.orEmpty() }.ifBlank { fetchDriveApiKeyFromSite() }
         if (key.isBlank()) {
-            throw Exception("Configure a Google Drive API key in the source settings")
+            throw Exception("Google Drive API key not found on the site. Configure one in the source settings")
         }
         return key
+    }
+
+    private fun fetchDriveApiKeyFromSite(): String {
+        val response = client.newCall(GET(baseUrl, headers)).execute()
+        return response.use {
+            val body = it.body.string()
+            GOOGLE_API_KEY_REGEX.find(body)?.value.orEmpty()
+                .also { key -> cachedDriveApiKey = key.ifBlank { null } }
+        }
     }
 
     override fun pageListParse(response: Response): List<Page> {
@@ -208,9 +220,9 @@ class AquellosQueTraducen(
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         EditTextPreference(screen.context).apply {
             key = DRIVE_API_KEY_PREF
-            title = "Google Drive API key"
-            summary = "Required to list chapter folders from Google Drive. Do not share this key."
-            dialogTitle = "Google Drive API key"
+            title = "Google Drive API key override"
+            summary = "Optional. Leave empty to use the public key exposed by the site at runtime."
+            dialogTitle = "Google Drive API key override"
             setDefaultValue("")
         }.also(screen::addPreference)
     }
@@ -229,6 +241,7 @@ class AquellosQueTraducen(
 
     companion object {
         private const val DRIVE_API_KEY_PREF = "driveApiKey"
+        private val GOOGLE_API_KEY_REGEX = Regex("AIza[0-9A-Za-z_-]{35}")
     }
 
     // ──── DTOs ────
