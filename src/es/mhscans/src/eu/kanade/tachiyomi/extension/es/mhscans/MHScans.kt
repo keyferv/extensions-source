@@ -10,25 +10,27 @@ import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.getPreferences
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import org.jsoup.nodes.Document
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
-class MHScans :
-    Madara(
-        "MHScans",
-        "https://mhscans.com",
-        "es",
-        dateFormat = SimpleDateFormat("dd 'de' MMMM 'de' yyyy", Locale("es")),
-    ),
+@Source
+abstract class MHScans :
+    Madara(),
     ConfigurableSource {
+    override val baseUrl: String
+        get() = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
+
+    override val dateFormat = SimpleDateFormat("dd 'de' MMMM 'de' yyyy", Locale("es"))
+
     override val client: OkHttpClient = super.client.newBuilder()
         .rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
         .build()
@@ -78,7 +80,6 @@ class MHScans :
     }
 
     companion object {
-        private const val REMOVE_PREMIUM_CHAPTERS = "removePremiumChapters"
-        private const val REMOVE_PREMIUM_CHAPTERS_DEFAULT = true
+        private const val BASE_URL_PREF = "overrideBaseUrl"
     }
 }
