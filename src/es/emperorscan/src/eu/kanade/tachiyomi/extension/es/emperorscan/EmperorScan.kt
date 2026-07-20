@@ -1,6 +1,9 @@
 package eu.kanade.tachiyomi.extension.es.emperorscan
 
+import android.content.SharedPreferences
+import android.widget.Toast
 import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.SChapter
@@ -10,9 +13,10 @@ import keiyoushi.annotation.Source
 import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.getPreferences
+import keiyoushi.utils.parseAs
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Response
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -21,12 +25,12 @@ import java.util.Locale
 abstract class EmperorScan :
     Madara(),
     ConfigurableSource {
+
     override val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es"))
 
-    private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
-
     override val useLoadMoreRequest = LoadMoreStrategy.Never
-    override val useNewChapterEndpoint = true
+
+    private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
 
     override val client = super.client.newBuilder()
         .rateLimit(2) { it.host == baseUrlHost }
@@ -35,79 +39,97 @@ abstract class EmperorScan :
     override fun headersBuilder() = super.headersBuilder()
         .setRandomUserAgent()
 
-    override fun getMangaUrl(manga: SManga) = "$baseUrl${manga.url}"
+    override fun getMangaUrl(manga: SManga) = baseUrl + manga.url
 
-    override fun popularMangaSelector() = "#mkAgrid a.acard, a.acard"
+    override fun popularMangaSelector() = "div#mkAgrid > a.acard"
 
-    override fun popularMangaFromElement(element: Element) = mangaFromACard(element)
+    override fun popularMangaNextPageSelector() = "div.wp-pagenavi > a.nextpostslink"
 
-    override fun searchMangaSelector() = popularMangaSelector()
-
-    override fun searchMangaFromElement(element: Element) = mangaFromACard(element)
-
-    private fun mangaFromACard(element: Element): SManga = SManga.create().apply {
+    override fun popularMangaFromElement(element: Element) = SManga.create().apply {
         setUrlWithoutDomain(element.attr("abs:href"))
-        title = element.selectFirst(".ac-t")?.text()
-            ?: element.attr("title")
-
-        element.selectFirst("img.ac-cover, img")?.let {
+        title = element.selectFirst("div.ac-t")!!.ownText()
+        element.selectFirst(popularMangaUrlSelectorImg)?.let {
             thumbnail_url = processThumbnail(imageFromElement(it), true)
         }
     }
 
-    override fun mangaDetailsParse(response: Response): SManga = mangaDetailsParse(response.asJsoup())
+    override fun searchMangaParse(response: Response) = popularMangaParse(response)
 
-    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        title = document.selectFirst(".htitle")?.text()
-            ?: document.selectFirst("meta[property=og:title]")?.attr("content")
-            ?: document.selectFirst("title")!!.text().substringBefore(" – ").substringBefore(" - ")
+    override val mangaDetailsSelectorTitle = "div.hcol > .htitle"
+    override val mangaDetailsSelectorStatus = "div.hcol > .htags > .htag--status"
+    override val mangaDetailsSelectorDescription = "div#syn > p"
+    override val mangaDetailsSelectorThumbnail = "div.hposter__card > img"
+    override val mangaDetailsSelectorGenre = "div.hcol > .hchips--genres > a.chip"
+    override val mangaDetailsSelectorTag = "div.hcol > .hchips--tags > a.chip"
 
-        thumbnail_url = document.selectFirst(".hposter img, meta[property=og:image]")?.let {
-            processThumbnail(imageFromElement(it), true)
+    override fun mangaDetailsParse(response: Response): SManga {
+        val manga = super.mangaDetailsParse(response)
+
+        manga.description = manga.description?.replace("HAZ CLICK AQUÍ PARA UNIRTE A NUESTRO DISCORD", "", ignoreCase = false)?.trim()
+
+        val removePremium = preferences.getBoolean(REMOVE_PREMIUM_CHAPTERS, REMOVE_PREMIUM_CHAPTERS_DEFAULT)
+        if (removePremium && !manga.genre.isNullOrEmpty()) {
+            val allCategories = manga.genre!!.split(",").map { it.trim() }
+
+            val filteredCategories = allCategories.filterNot { item ->
+                item.contains("Vip", ignoreCase = true) ||
+                    item.contains("Premium", ignoreCase = true) ||
+                    item.contains("Emperor scan", ignoreCase = true)
+            }
+
+            manga.genre = filteredCategories.joinToString(", ")
         }
 
-        description = document.selectFirst(".syn")?.text()
-            ?: document.selectFirst("meta[property=og:description]")?.attr("content")
-
-        status = when (document.selectFirst(".htag--status, .sir:has(.l:contains(Estado)) .v")?.text()) {
-            "En Curso" -> SManga.ONGOING
-            "Completado", "Finalizado" -> SManga.COMPLETED
-            else -> SManga.UNKNOWN
-        }
-
-        genre = document.select(".hchips--genres .chip").eachText().joinToString()
+        return manga
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        val chapterData = document.selectFirst("script#mk-chapters-data")?.data()
-            ?: return document.select(chapterListSelector()).map(::chapterFromElement)
+        val scriptData = response.asJsoup().selectFirst("script#mk-chapters-data")!!.data()
+        val dto = scriptData.parseAs<ChapterListDto>()
 
-        return chapterRegex.findAll(chapterData).map { match ->
-            val name = unescapeJsonValue(match.groups[2]!!.value)
-            val url = unescapeJsonValue(match.groups[3]!!.value)
-            val date = unescapeJsonValue(match.groups[4]!!.value)
+        val removePremium = preferences.getBoolean(REMOVE_PREMIUM_CHAPTERS, REMOVE_PREMIUM_CHAPTERS_DEFAULT)
+        val chapters = dto.items
 
-            SChapter.create().apply {
-                this.name = name
-                this.url = url.substringBefore("?style=paged") + chapterUrlSuffix
-                date_upload = parseRelativeDate(date)
+        val filteredChapters = if (removePremium) {
+            chapters.filterNot { chapter ->
+                chapter.name.contains("Vip", ignoreCase = true) ||
+                    chapter.name.contains("Soberano", ignoreCase = true) ||
+                    chapter.name.contains("Premium", ignoreCase = true) ||
+                    chapter.url.contains("/membership-levels/", ignoreCase = true) ||
+                    chapter.st.contains("locked", ignoreCase = true)
             }
-        }.toList()
+        } else {
+            chapters
+        }
+
+        return filteredChapters.map { chapterDto ->
+            SChapter.create().apply {
+                setUrlWithoutDomain(chapterDto.url)
+                name = chapterDto.name
+                date_upload = parseChapterDate(chapterDto.ago)
+            }
+        }
     }
 
-    private fun unescapeJsonValue(value: String): String = value
-        .replace("\\/", "/")
-        .replace("\\u0026", "&")
-        .replace("\\\"", "\"")
-
-    private val chapterRegex = Regex(
-        """\{"id":\d+,"num":"([^"]*)","name":"([^"]*)","url":"([^"]*)","ago":"([^"]*)""",
-    )
-
-    override val mangaDetailsSelectorDescription = "div.summary_content div.post-content_item:has(h5:contains(Sinopsis)) div"
+    private val preferences: SharedPreferences = getPreferences()
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         screen.addRandomUAPreference()
+
+        SwitchPreferenceCompat(screen.context).apply {
+            key = REMOVE_PREMIUM_CHAPTERS
+            title = "Filtrar capítulos VIP"
+            summary = "Oculta automáticamente los capítulos VIP"
+            setDefaultValue(REMOVE_PREMIUM_CHAPTERS_DEFAULT)
+            setOnPreferenceChangeListener { _, _ ->
+                Toast.makeText(screen.context, "Para aplicar los cambios, actualiza la lista de capítulos", Toast.LENGTH_LONG).show()
+                true
+            }
+        }.also { screen.addPreference(it) }
+    }
+
+    companion object {
+        private const val REMOVE_PREMIUM_CHAPTERS = "removePremiumChapters"
+        private const val REMOVE_PREMIUM_CHAPTERS_DEFAULT = true
     }
 }

@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.nartag
 
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -8,20 +9,17 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
+import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
 import kotlin.time.Duration.Companion.seconds
 
-class Rncalation : HttpSource() {
-
-    override val name = "Rncalation"
-
-    override val baseUrl = "https://rncalation.online"
-
-    override val lang = "es"
+@Source
+abstract class Rncalation : HttpSource() {
 
     override val supportsLatest = true
 
@@ -155,6 +153,25 @@ class Rncalation : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
+
+        val rkForm = document.selectFirst("form#rkf")
+        if (rkForm != null) {
+            val actionUrl = rkForm.absUrl("action")
+            val formBuilder = FormBody.Builder()
+            rkForm.select("input[name]").forEach { input ->
+                formBuilder.add(input.attr("name"), input.attr("value"))
+            }
+
+            val finalDocument = client.newCall(
+                POST(actionUrl, headers, formBuilder.build()),
+            ).execute().asJsoup()
+
+            return finalDocument.select("img.page-img, .page-wrap img").mapIndexed { index, element ->
+                val imageUrl = element.attr("abs:data-src").ifEmpty { element.attr("abs:src") }
+                Page(index, imageUrl = imageUrl)
+            }
+        }
+
         return document.select("img.page-img, .page-wrap img").mapIndexed { index, element ->
             val imageUrl = element.attr("abs:data-src").ifEmpty { element.attr("abs:src") }
             Page(index, imageUrl = imageUrl)

@@ -1,19 +1,18 @@
+import io.github.keiyoushi.gradle.api.ContentWarning
+
 plugins {
-    id("com.android.library")
-    kotlin("android")
+    alias(kei.plugins.extension)
 }
 
-android {
-    compileSdk = 33
-    defaultConfig {
-        minSdk = 21
-        targetSdk = 33
+keiyoushi {
+    name = "LectorHentai"
+    versionCode = 9
+    contentWarning = ContentWarning.NSFW
+    libVersion = "1.4"
+    theme = "madara"
+
+    source {
+        lang = "es"
+        baseUrl = "https://lectorhentai.com"
     }
-    sourceSets["main"].java.srcDirs("src")
-    sourceSets["main"].res.srcDirs("res")
-}
-
-dependencies {
-    implementation(project(":core"))
-    implementation(project(":lib:madara"))
 }
