@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.source.model.Page
+import keiyoushi.annotation.Source
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -15,13 +16,10 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.zip.ZipInputStream
 
-class BarManga :
-    Madara(
-        "BarManga",
-        "https://archiviumbar.com",
-        "es",
-        SimpleDateFormat("dd/MM/yyyy", Locale.ROOT),
-    ) {
+@Source
+abstract class BarManga : Madara() {
+    override val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ROOT)
+
     override val useLoadMoreRequest = LoadMoreStrategy.Always
 
     override val filterNonMangaItems = false

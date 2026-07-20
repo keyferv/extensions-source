@@ -2,24 +2,21 @@ package eu.kanade.tachiyomi.extension.es.animebbg
 
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class AnimeBBG : ParsedHttpSource() {
-
-    override val name = "AnimeBBG"
-
-    override val baseUrl = "https://animebbg.net"
-
-    override val lang = "es"
+@Source
+abstract class AnimeBBG : HttpSource() {
 
     override val supportsLatest = true
     private val seenLatestManga = mutableSetOf<String>()
@@ -29,15 +26,19 @@ class AnimeBBG : ParsedHttpSource() {
 
     override fun popularMangaRequest(page: Int): Request = GET(baseUrl, headers)
 
-    override fun popularMangaSelector(): String = "a.xcHomeV2-rankCard"
+    override fun popularMangaParse(response: Response): MangasPage {
+        val document = response.asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        return MangasPage(mangas, false)
+    }
 
-    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
+    private fun popularMangaSelector(): String = "a.xcHomeV2-rankCard"
+
+    private fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
         setUrlWithoutDomain(element.attr("href"))
         title = element.selectFirst("strong")?.text()?.trim() ?: ""
         thumbnail_url = element.selectFirst("img")?.attr("abs:src")
     }
-
-    override fun popularMangaNextPageSelector(): String? = null
 
     // Latest
 
@@ -51,18 +52,18 @@ class AnimeBBG : ParsedHttpSource() {
         return GET("$baseUrl/whats-new/resource-albums/${idTemplate}page-$page", headers)
     }
 
-    override fun latestUpdatesSelector(): String = "div.structItem--albumLink"
+    private fun latestUpdatesSelector(): String = "div.structItem--albumLink"
 
-    override fun latestUpdatesFromElement(element: Element): SManga = SManga.create().apply {
+    private fun latestUpdatesFromElement(element: Element): SManga = SManga.create().apply {
         val mangaLink = element.selectFirst(".structItem-title a:last-of-type")
         setUrlWithoutDomain(mangaLink?.attr("href") ?: "")
         title = mangaLink?.text() ?: ""
         thumbnail_url = element.selectFirst(".structItem-iconContainer img")?.attr("abs:src")
     }
 
-    override fun latestUpdatesNextPageSelector(): String = "a.pageNav-jump--next"
+    private fun latestUpdatesNextPageSelector(): String = "a.pageNav-jump--next"
 
-    override fun latestUpdatesParse(response: Response): eu.kanade.tachiyomi.source.model.MangasPage {
+    override fun latestUpdatesParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
         // Extract/Update ID for next pages
@@ -91,7 +92,7 @@ class AnimeBBG : ParsedHttpSource() {
             }
         }
 
-        return eu.kanade.tachiyomi.source.model.MangasPage(filteredMangas, hasNextPage)
+        return MangasPage(filteredMangas, hasNextPage)
     }
 
     // Search
@@ -107,20 +108,29 @@ class AnimeBBG : ParsedHttpSource() {
         return GET(url, headers)
     }
 
-    override fun searchMangaSelector(): String = "div.contentRow:has(h3.contentRow-title a[href*='/comics/']):not(:has(span.label:contains(Discusión)))"
+    override fun searchMangaParse(response: Response): MangasPage {
+        val document = response.asJsoup()
+        val mangas = document.select(searchMangaSelector()).map { searchMangaFromElement(it) }
+        val hasNextPage = document.selectFirst(searchMangaNextPageSelector()) != null
+        return MangasPage(mangas, hasNextPage)
+    }
 
-    override fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
+    private fun searchMangaSelector(): String = "div.contentRow:has(h3.contentRow-title a[href*='/comics/']):not(:has(span.label:contains(Discusión)))"
+
+    private fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
         val link = element.selectFirst("h3.contentRow-title a")
         setUrlWithoutDomain(link?.attr("href") ?: "")
         title = link?.ownText()?.trim() ?: link?.text()?.trim() ?: ""
         thumbnail_url = "" // Real thumbnail is fetched in mangaDetailsParse
     }
 
-    override fun searchMangaNextPageSelector(): String = "a.pageNav-jump--next"
+    private fun searchMangaNextPageSelector(): String = "a.pageNav-jump--next"
 
     // Details
 
-    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+    override fun mangaDetailsParse(response: Response): SManga = mangaDetailsParse(response.asJsoup())
+
+    private fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
         title = document.selectFirst("h1.p-title-value")?.ownText()?.trim()
             ?: document.select("h1.p-title-value").text().substringAfter(" Manhwa ").trim()
         description = document.select("div.bbWrapper").text()
@@ -140,9 +150,9 @@ class AnimeBBG : ParsedHttpSource() {
 
     private fun chapterListRequest(manga: SManga, page: Int): Request = GET(baseUrl + manga.url.removeSuffix("/") + "/capitulos" + if (page > 1) "?page=$page" else "", headers)
 
-    override fun chapterListSelector(): String = "div.md-chapter-row"
+    private fun chapterListSelector(): String = "div.md-chapter-row"
 
-    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
+    private fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
         val link = element.selectFirst("a.md-chapter-link")
         setUrlWithoutDomain(link?.attr("href") ?: "")
         val title = link?.text()?.trim() ?: ""
@@ -182,7 +192,9 @@ class AnimeBBG : ParsedHttpSource() {
 
     // Pages
 
-    override fun pageListParse(document: Document): List<Page> {
+    override fun pageListParse(response: Response): List<Page> = pageListParse(response.asJsoup())
+
+    private fun pageListParse(document: Document): List<Page> {
         // New avmReader format: images use data-src for lazy loading
         val pages = document.select("div.avmReader-page:not(.avmReader-page--end)")
 
@@ -221,5 +233,5 @@ class AnimeBBG : ParsedHttpSource() {
         }.filterNotNull()
     }
 
-    override fun imageUrlParse(document: Document): String = ""
+    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }

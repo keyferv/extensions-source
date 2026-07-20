@@ -3,32 +3,33 @@ package eu.kanade.tachiyomi.extension.es.mangasnosekai
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.util.asJsoup
-import kotlinx.serialization.decodeFromString
+import keiyoushi.annotation.Source
+import keiyoushi.lib.synchrony.Deobfuscator
+import keiyoushi.network.rateLimit
+import keiyoushi.utils.parseAs
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.time.Duration.Companion.seconds
 
-class MangasNoSekai :
-    Madara(
-        "Mangas No Sekai",
-        "https://mangasnosekai.com",
-        "es",
-        SimpleDateFormat("MMMM dd, yyyy", Locale("es")),
-    ) {
+@Source
+abstract class MangasNoSekai : Madara() {
+    override val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es"))
+    private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
 
     override val useLoadMoreRequest = LoadMoreStrategy.Never
 
     override val client = super.client.newBuilder()
-        .rateLimitHost(baseUrl.toHttpUrl(), 2, 1)
+        .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
         .build()
 
     override val useNewChapterEndpoint = true
@@ -45,12 +46,12 @@ class MangasNoSekai :
         val manga = SManga.create()
 
         with(element) {
-            selectFirst("figcaption")?.let {
-                manga.title = it.text()
+            selectFirst(popularMangaUrlSelector)!!.let {
+                manga.setUrlWithoutDomain(it.attr("abs:href"))
             }
 
-            selectFirst(popularMangaUrlSelector)?.let {
-                manga.setUrlWithoutDomain(it.attr("abs:href"))
+            selectFirst("figcaption")!!.let {
+                manga.title = it.text()
             }
 
             selectFirst("img")?.let {
@@ -137,138 +138,72 @@ class MangasNoSekai :
         intl["order_by_filter_new"] to "new-manga",
     )
 
-    private val altChapterListSelector = "div.contenedor-capitulo-miniatura"
+    private fun altChapterRequest(url: String, mangaId: String, page: Int, objects: List<Pair<String, String>>): Request {
+        val form = FormBody.Builder()
+            .add("mangaid", mangaId)
+            .add("page", page.toString())
+
+        objects.forEach { (key, value) ->
+            form.add(key, value)
+        }
+
+        return POST(baseUrl + url, xhrHeaders, form.build())
+    }
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
         launchIO { countViews(document) }
 
-        val mangaSlug = response.request.url.toString().substringAfter(baseUrl).removeSuffix("/")
+        val coreScript = document.selectFirst("script#wp-manga-js")!!.attr("abs:src")
+        val coreScriptBody = Deobfuscator.deobfuscateScript(client.newCall(GET(coreScript, headers)).execute().body.string())
+            ?: throw Exception("No se pudo deobfuscar el script")
 
-        // Capítulos renderizados directamente en el HTML (página 1)
-        val directChapters = document.select(altChapterListSelector).map(::altChapterFromElement)
+        val regexCapture = ACTION_REGEX.find(coreScriptBody)?.groupValues
+        val url = regexCapture?.get(1) ?: throw Exception("No se pudo obtener la url del capítulo")
+        val data = regexCapture.getOrNull(2)?.trim() ?: throw Exception("No se pudo obtener la data del capítulo")
 
-        // Intentar obtener el resto de capítulos vía AJAX/JSON paginado
-        val ajaxChapters = tryFetchAjaxChapters(document, mangaSlug, directChapters)
-        if (ajaxChapters != null) return ajaxChapters
+        val objects = OBJECTS_REGEX.findAll(data)
+            .mapNotNull { matchResult ->
+                val key = matchResult.groupValues[1]
+                val value = matchResult.groupValues.getOrNull(2)
+                if (!value.isNullOrEmpty()) key to value else null
+            }.toList()
 
-        if (directChapters.isNotEmpty()) {
-            return directChapters
-        }
-
-        throw Exception("No se pudieron obtener los capítulos")
-    }
-
-    /**
-     * Intenta obtener capítulos vía el endpoint AJAX/JSON del sitio.
-     * Este es el método que usa el sitio real para cargar TODOS los capítulos paginados.
-     */
-    private fun tryFetchAjaxChapters(
-        document: Document,
-        mangaSlug: String,
-        directChapters: List<SChapter>,
-    ): List<SChapter>? {
-        // 1. Obtener manga ID (ya funciona bien)
         val mangaId = document.selectFirst("script#wp-manga-js-extra")?.data()
             ?.let { MANGA_ID_REGEX.find(it)?.groupValues?.get(1) }
             ?: document.selectFirst("script#manga_disqus_embed-js-extra")?.data()
                 ?.let { ALT_MANGA_ID_REGEX.find(it)?.groupValues?.get(1) }
-            ?: return null
+            ?: throw Exception("No se pudo obtener el id del manga")
 
-        // 2. Buscar el secret en script.js de madara-core
-        val secret = extractSecret(document) ?: return null
-
-        // 3. Llamar directo al endpoint conocido
-        val endpoint = "$baseUrl/wp-json/muslitos/v1/getcaps7"
-
-        fun buildForm(page: Int) = FormBody.Builder()
-            .add("action", "muslitos_anti_hack")
-            .add("mangaid", mangaId)
-            .add("page", page.toString())
-            .add("secret", secret)
-            .build()
-
-        // Página 1
-        val firstBody = try {
-            client.newCall(POST(endpoint, xhrHeaders, buildForm(1))).execute().body.string()
-        } catch (_: Exception) {
-            return null
-        }
-
-        val firstResult = try {
-            json.decodeFromString<ChapterListResponse>(firstBody)
-        } catch (_: Exception) {
-            return null
-        }
-
-        if (firstResult.chaptersToDisplay.isEmpty()) return null
-
-        val allChapters = firstResult.chaptersToDisplay.map { it.toSChapter() }.toMutableList()
-
-        // Páginas restantes
-        for (page in 2..firstResult.totalPages) {
-            val body = try {
-                client.newCall(POST(endpoint, xhrHeaders, buildForm(page))).execute().body.string()
-            } catch (_: Exception) {
-                break
+        val chapterList = mutableListOf<SChapter>()
+        var page = 1
+        do {
+            val request = altChapterRequest(url, mangaId, page, objects)
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                throw Exception("HTTP ${response.code}: Intente iniciar sesión en WebView")
             }
+            val result = response.parseAs<ChapterWrapper>()
+            chapterList.addAll(result.chapters.map { it.toSChapter() })
+            page++
+        } while (result.hasNextPage())
 
-            val result = try {
-                json.decodeFromString<ChapterListResponse>(body)
-            } catch (_: Exception) {
-                break
-            }
-
-            allChapters.addAll(result.chaptersToDisplay.map { it.toSChapter() })
-        }
-
-        return allChapters.takeIf { it.isNotEmpty() }
+        return chapterList
     }
 
-    // Busca el secret en el script.js externo de madara-core
-    private fun extractSecret(document: Document): String? {
-        val scriptUrl = document
-            .select("script[src*='madara-core'][src*='script.js']")
-            .firstOrNull()
-            ?.attr("abs:src") ?: return null
-
-        val body = try {
-            client.newCall(GET(scriptUrl, headers)).execute().body.string()
-        } catch (_: Exception) {
-            return null
-        }
-
-        return SECRET_REGEX.find(body)?.groupValues?.get(1)
+    private fun Chapter.toSChapter() = SChapter.create().apply {
+        name = this@toSChapter.name
+        val cleanDate = Jsoup.parseBodyFragment(this@toSChapter.date).wholeText()
+        date_upload = parseChapterDate(cleanDate)
+        setUrlWithoutDomain(this@toSChapter.url.removeSuffix("/"))
     }
 
-    private fun altChapterFromElement(element: Element) = SChapter.create().apply {
-        name = element.selectFirst("div.text-sm")?.text()?.trim() ?: ""
-        element.selectFirst("a")?.let {
-            setUrlWithoutDomain(it.attr("abs:href"))
-        }
-        date_upload = element.selectFirst("time")?.text()?.let {
-            parseChapterDate(it)
-        } ?: 0
-    }
+    override fun pageListRequest(chapter: SChapter): Request = super.pageListRequest(chapter.apply { url = "$url/" })
 
     companion object {
-        val MANGA_ID_REGEX = MangasNoSekaiPatterns.MANGA_ID_REGEX
-        val ALT_MANGA_ID_REGEX = MangasNoSekaiPatterns.ALT_MANGA_ID_REGEX
-        val SECRET_REGEX = MangasNoSekaiPatterns.SECRET_REGEX
+        val ACTION_REGEX = """function\s+.*?[\s\S]*?\.ajax;?[\s\S]*?(?:'?url'?:\s*'([^']*)')(?:[\s\S]*?'?data'?:\s*\{([^}]*)\})?""".toRegex()
+        val OBJECTS_REGEX = """\s*'?(\w+)'?\s*:\s*(?:(?:'([^']*)'|([^,\r\n]+))\s*,?\s*)""".toRegex()
+        val MANGA_ID_REGEX = """\"manga_id"\s*:\s*"(.*)\"""".toRegex()
+        val ALT_MANGA_ID_REGEX = """\"postId"\s*:\s*"(.*)\"""".toRegex()
     }
-}
-
-/**
- * Pure Kotlin object holding regex patterns. Extracted for testability
- * without requiring Android dependencies.
- */
-object MangasNoSekaiPatterns {
-    // Matches AJAX call: finds url (single/double/unquoted) and data object
-    val ACTION_REGEX = """\.ajax\s*\([\s\S]*?['"]?url['"]?\s*:\s*(?:"([^"]*)"|'([^']*)'|`([^`]*)`|([^,;\s}]+))[\s\S]*?['"]?data['"]?\s*:\s*\{([^}]*)\}""".toRegex()
-
-    // Matches key-value pairs in JS object: key: value (handles quotes and unquoted)
-    val OBJECTS_REGEX = """\s*['"]?(\w+)['"]?\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,}\r\n]+))""".toRegex()
-    val MANGA_ID_REGEX = """"manga_id"\s*:\s*"([^"]+)"""".toRegex()
-    val ALT_MANGA_ID_REGEX = """"postId"\s*:\s*"([^"]+)"""".toRegex()
-    val SECRET_REGEX = """secret\s*:\s*['"]([^'"]+)['"]""".toRegex()
 }
