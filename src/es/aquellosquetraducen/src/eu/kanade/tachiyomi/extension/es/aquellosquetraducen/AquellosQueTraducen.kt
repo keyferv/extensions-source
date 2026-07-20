@@ -1,6 +1,10 @@
 package eu.kanade.tachiyomi.extension.es.aquellosquetraducen
 
+import android.content.SharedPreferences
+import androidx.preference.EditTextPreference
+import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -8,6 +12,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -19,7 +24,8 @@ import okhttp3.Response
 class AquellosQueTraducen(
     override val lang: String,
     override val id: Long,
-) : HttpSource() {
+) : HttpSource(),
+    ConfigurableSource {
 
     override val name = "Aquellos Que Traducen"
 
@@ -28,7 +34,10 @@ class AquellosQueTraducen(
     override val supportsLatest = true
 
     private val firebaseProjectId = "aquellosquetraducen-40706"
-    private val driveApiKey = "REDACTED_GOOGLE_API_KEY"
+    private val preferences: SharedPreferences = getPreferences()
+
+    private val driveApiKey: String
+        get() = preferences.getString(DRIVE_API_KEY_PREF, "").orEmpty().trim()
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -130,6 +139,7 @@ class AquellosQueTraducen(
         val doc = response.parseAs<FirestoreDocument>()
         val fields = doc.fields ?: return emptyList()
         val driveFolderId = fields.driveFolderId?.stringValue ?: return emptyList()
+        val driveApiKey = requireDriveApiKey()
 
         val driveUrl = "https://www.googleapis.com/drive/v3/files?q='$driveFolderId'+in+parents+and+trashed=false&fields=files(id,name,createdTime)&key=$driveApiKey&pageSize=1000&orderBy=name".toHttpUrl()
         val driveRequest = GET(driveUrl, headers)
@@ -169,8 +179,17 @@ class AquellosQueTraducen(
     // ──── Pages ────
 
     override fun pageListRequest(chapter: SChapter): Request {
+        val driveApiKey = requireDriveApiKey()
         val url = "https://www.googleapis.com/drive/v3/files?q='${chapter.url}'+in+parents+and+trashed=false&fields=files(id,name,mimeType)&key=$driveApiKey&orderBy=name".toHttpUrl()
         return GET(url, headers)
+    }
+
+    private fun requireDriveApiKey(): String {
+        val key = driveApiKey
+        if (key.isBlank()) {
+            throw Exception("Configure a Google Drive API key in the source settings")
+        }
+        return key
     }
 
     override fun pageListParse(response: Response): List<Page> {
@@ -186,6 +205,16 @@ class AquellosQueTraducen(
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        EditTextPreference(screen.context).apply {
+            key = DRIVE_API_KEY_PREF
+            title = "Google Drive API key"
+            summary = "Required to list chapter folders from Google Drive. Do not share this key."
+            dialogTitle = "Google Drive API key"
+            setDefaultValue("")
+        }.also(screen::addPreference)
+    }
+
     // ──── Helpers ────
 
     private fun optimizeCoverUrl(url: String): String {
@@ -196,6 +225,10 @@ class AquellosQueTraducen(
         } else {
             url
         }
+    }
+
+    companion object {
+        private const val DRIVE_API_KEY_PREF = "driveApiKey"
     }
 
     // ──── DTOs ────
