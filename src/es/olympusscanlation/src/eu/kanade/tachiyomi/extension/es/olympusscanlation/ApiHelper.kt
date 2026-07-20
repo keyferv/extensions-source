@@ -15,7 +15,9 @@ class ApiHelper(
     private val apiBaseUrl: String,
 ) {
     private val json: Json by injectLazy()
-    private val websiteBaseUrl = apiBaseUrl.replace("https://dashboard.", "https://")
+    private val websiteBaseUrl = apiBaseUrl
+        .replace("https://dashboard.", "https://")
+        .replace("https://panel.", "https://")
 
     fun resolveMangaByName(
         title: String,
@@ -68,7 +70,7 @@ class ApiHelper(
                             ).build(),
                     ).execute()
             val body = response.body.string()
-            if (isErrorPage(response.code, body)) {
+            if (response.code == 401 || isErrorPage(response.code, body)) {
                 return null
             }
             val series = json.decodeMangaListPayload(body).filter { it.type == "comic" }
@@ -140,7 +142,7 @@ class ApiHelper(
                             ).build(),
                     ).execute()
             val body = response.body.string()
-            if (!isErrorPage(response.code, body)) {
+            if (response.code != 401 && !isErrorPage(response.code, body)) {
                 val series = json.decodeMangaListPayload(body)
                 cacheManager.setCachedSeriesList(series)
                 Log.d("OlympusScanlation", "Lista completa cargada: ${series.size} series")

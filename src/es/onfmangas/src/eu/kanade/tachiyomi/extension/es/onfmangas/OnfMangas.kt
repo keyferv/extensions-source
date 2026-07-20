@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
@@ -30,11 +31,9 @@ private const val ONF_USER_AGENT =
 private const val ONF_SEC_CH_UA =
     "\"Android WebView\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\""
 
-class OnfMangas : HttpSource() {
+@Source
+abstract class OnfMangas : HttpSource() {
 
-    override val name = "ONF MANGAS"
-    override val baseUrl = "https://onfmangas.com"
-    override val lang = "es"
     override val supportsLatest = true
 
     // Clean client without CloudflareInterceptor that interferes with Turnstile challenges

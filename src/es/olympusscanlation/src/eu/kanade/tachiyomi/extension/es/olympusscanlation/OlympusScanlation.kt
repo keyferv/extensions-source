@@ -2,8 +2,6 @@ package eu.kanade.tachiyomi.extension.es.olympusscanlation
 
 import android.content.SharedPreferences
 import android.util.Log
-import android.widget.Toast
-import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -14,8 +12,10 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferences
+import keiyoushi.utils.parseAs
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -27,45 +27,47 @@ import uy.kohesive.injekt.injectLazy
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import kotlin.math.min
 import kotlin.time.Duration.Companion.seconds
 
-class OlympusScanlation :
+@Source
+abstract class OlympusScanlation :
     HttpSource(),
     ConfigurableSource {
     private val fetchedDomainUrlHost by lazy { fetchedDomainUrl.toHttpUrl().host }
     private val apiBaseUrlHost by lazy { apiBaseUrl.toHttpUrl().host }
 
-    override val versionId = 5
     private val isCi = System.getenv("CI") == "true"
+    private val shouldFetchDomain: Boolean get() = preferences.getBoolean("fetchDomain", true)
 
     override val baseUrl: String get() =
         when {
             isCi -> defaultBaseUrl
-            preferences.fetchDomainPref() -> fetchedDomainUrl
-            else -> preferences.prefBaseUrl
+            shouldFetchDomain -> fetchedDomainUrl
+            else -> getPrefBaseUrl()
         }
 
     private val defaultBaseUrl: String = "https://olympusxyz.com"
 
     private val fetchedDomainUrl: String by lazy {
-        if (!preferences.fetchDomainPref()) return@lazy preferences.prefBaseUrl
+        if (!shouldFetchDomain) return@lazy getPrefBaseUrl()
         try {
             val initClient = network.client
             val headers = super.headersBuilder().build()
             val document = initClient.newCall(GET("https://olympus.pages.dev", headers)).execute().asJsoup()
             val domain =
                 document.selectFirst("meta[property=og:url]")?.attr("content")
-                    ?: return@lazy preferences.prefBaseUrl
+                    ?: return@lazy getPrefBaseUrl()
             val host =
                 initClient
                     .newCall(GET(domain, headers))
                     .execute()
                     .request.url.host
             val newDomain = "https://$host"
-            preferences.prefBaseUrl = newDomain
+            setPrefBaseUrl(newDomain)
             newDomain
         } catch (_: Exception) {
-            preferences.prefBaseUrl
+            getPrefBaseUrl()
         }
     }
 
@@ -73,8 +75,8 @@ class OlympusScanlation :
         fetchedDomainUrl.replace("https://", "https://panel.")
     }
 
-    override val lang: String = "es"
-    override val name: String = "Olympus Scanlation"
+    private val publicApiBaseUrl: String get() = baseUrl
+    private val dashboardApiBaseUrl: String get() = apiBaseUrl
 
     override val supportsLatest: Boolean = true
 
@@ -82,6 +84,19 @@ class OlympusScanlation :
     private val cacheManager = MangaCacheManager(preferences)
     private val apiHelper by lazy { ApiHelper(client, headersMap, dashboardApiBaseUrl) }
     private val filterManager by lazy { FilterManager(preferences, client) }
+
+    companion object {
+        private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
+
+        private const val FETCH_DOMAIN_PREF = "fetchDomain"
+        private const val FETCH_DOMAIN_PREF_DEFAULT = true
+
+        private const val SLUG_MAP = "slugMap"
+
+        private const val TAG = "OlympusScanlation"
+
+        private const val CACHE_DURATION_MS = 60 * 60 * 1000L // 1 hour
+    }
 
     private val headersMap: Map<String, String>
         get() {
@@ -107,6 +122,7 @@ class OlympusScanlation :
             .rateLimit(1, 2.seconds) { it.host == fetchedDomainUrlHost }
             .rateLimit(2, 1.seconds) { it.host == apiBaseUrlHost }
             .build()
+        client
     }
 
     private val json: Json by injectLazy()
@@ -114,6 +130,18 @@ class OlympusScanlation :
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", Locale.US).apply {
         timeZone = TimeZone.getTimeZone("UTC")
     }
+
+    private data class MangaRefTag(val manga: SManga)
+
+    private data class MangaTitleTag(val title: String)
+
+    private var SharedPreferences.slugMap: Map<Int, String>
+        get() = runCatching {
+            json.decodeFromString<Map<Int, String>>(getString(SLUG_MAP, "{}") ?: "{}")
+        }.getOrDefault(emptyMap())
+        set(value) {
+            edit().putString(SLUG_MAP, json.encodeToString(value)).apply()
+        }
 
     @Volatile
     private var seriesList: List<MangaDto> = emptyList()
@@ -153,7 +181,7 @@ class OlympusScanlation :
         seriesList = comics
         lastFetchTime = now
 
-        val newSlugMap = comics.associate { it.id to it.slug }
+        val newSlugMap = comics.mapNotNull { dto -> dto.id?.let { it to dto.slug } }.toMap()
 
         preferences.slugMap += newSlugMap + fetchHomepageSlugs()
     }
@@ -169,7 +197,11 @@ class OlympusScanlation :
                 throw Exception("Failed to fetch paginated series page $page: HTTP ${response.code}")
             }
             val payload = response.parseAs<PayloadSeriesDto>()
-            val seriesPage = payload.data.series
+            val seriesPage = payload.data.series ?: SeriesDto(
+                current_page = payload.data.current_page ?: page,
+                data = payload.data.data.orEmpty(),
+                last_page = payload.data.last_page ?: page,
+            )
 
             allComics += seriesPage.data.filter { it.type == "comic" }
 
@@ -346,6 +378,34 @@ class OlympusScanlation :
         return MangasPage(mangaList, hasNextPage = hasNextPage)
     }
 
+    private fun buildTrackedMangaUrlForFallback(
+        href: String,
+        title: String,
+    ): String {
+        val slug = href.substringAfter("/series/comic-").substringBefore("?").substringBefore("/")
+        val match = runCatching { fetchMangaDtoBySlug(slug) }.getOrNull()
+            ?: runCatching { apiHelper.resolveMangaByName(title, null, cacheManager) }.getOrNull()
+        val id = match?.id
+        if (slug.isNotBlank() && id != null) {
+            preferences.slugMap = preferences.slugMap + (id to slug)
+            cacheManager.updateMangaCache(id.toString(), title, slug)
+        }
+        return id?.toString() ?: "/series/comic-$slug"
+    }
+
+    private fun resolveStableId(
+        slug: String,
+        name: String,
+        idString: String?,
+    ): String {
+        val id = idString?.toIntOrNull()
+            ?: apiHelper.resolveIdBySlug(slug, cacheManager)?.toIntOrNull()
+            ?: throw Exception("Unable to resolve Olympus manga ID for $name")
+        preferences.slugMap = preferences.slugMap + (id to slug)
+        cacheManager.updateMangaCache(id.toString(), name, slug)
+        return id.toString()
+    }
+
     override fun searchMangaRequest(
         page: Int,
         query: String,
@@ -432,6 +492,9 @@ class OlympusScanlation :
             return MangasPage(mangaList, hasNextPage = false)
         }
 
+        return MangasPage(emptyList(), hasNextPage = false)
+    }
+
     private fun parseMangaId(url: String): Int {
         // Handles: "123", "/series/comic-slug?mangaId=123", "123/456", and legacy chapter URLs.
         val idFromParam = url.substringAfter("mangaId=", "")
@@ -441,6 +504,8 @@ class OlympusScanlation :
         return rawId.trim().toIntOrNull()
             ?: throw IllegalArgumentException("Unable to parse Olympus manga ID from URL: $url")
     }
+
+    private fun parseMangaIdOrNull(url: String): Int? = runCatching { parseMangaId(url) }.getOrNull()
 
     private fun normalizedMangaId(url: String): String = parseMangaId(url).toString()
 
@@ -467,24 +532,86 @@ class OlympusScanlation :
         .trim()
 
     override fun getMangaUrl(manga: SManga): String {
-        val mangaId = parseMangaId(manga.url)
-        val slug = preferences.slugMap[mangaId] ?: throw Exception("Slug not found for manga $mangaId")
+        val mangaId = parseMangaIdOrNull(manga.url)
+        val slug = if (mangaId != null) {
+            resolveSlugForMangaId(mangaId, manga.title)
+        } else {
+            UrlUtils.mangaSlugFromUrl(manga.url) ?: throw Exception("Slug not found for manga ${manga.title}")
+        }
         return "$baseUrl/series/comic-$slug"
     }
 
-        // La API a veces devuelve la lista de mangas directamente en data, o dentro de data.series
-        val seriesData = result.data.series ?: SeriesDto(
-            current_page = result.data.current_page ?: 1,
-            data = result.data.data ?: emptyList(),
-            last_page = result.data.last_page ?: 1,
-        )
-
     override fun mangaDetailsRequest(manga: SManga): Request {
-        val mangaId = parseMangaId(manga.url)
-        val slug = preferences.slugMap[mangaId] ?: throw Exception("Slug not found for manga $mangaId")
+        val mangaId = parseMangaIdOrNull(manga.url)
+        val slug = if (mangaId != null) {
+            resolveSlugForMangaId(mangaId, manga.title)
+        } else {
+            UrlUtils.mangaSlugFromUrl(manga.url) ?: throw Exception("Slug not found for manga ${manga.title}")
+        }
 
         val apiUrl = "$baseUrl/api/series/$slug?type=comic"
         return GET(url = apiUrl, headers = headers)
+            .newBuilder()
+            .tag(MangaRefTag::class.java, MangaRefTag(manga))
+            .tag(MangaTitleTag::class.java, MangaTitleTag(manga.title))
+            .build()
+    }
+
+    private fun resolveSlugForMangaId(
+        mangaId: Int,
+        title: String? = null,
+    ): String {
+        val id = mangaId.toString()
+        val resolvedSlug = apiHelper.resolveSlugById(id, title, cacheManager)
+        if (!resolvedSlug.isNullOrBlank()) {
+            preferences.slugMap = preferences.slugMap + (mangaId to resolvedSlug)
+            return resolvedSlug
+        }
+        return preferences.slugMap[mangaId] ?: throw Exception("Slug not found for manga $mangaId")
+    }
+
+    private fun updateTaggedMangaUrl(
+        response: Response,
+        slug: String,
+    ) {
+        val taggedManga = response.request.tag(MangaRefTag::class.java)?.manga ?: return
+        val mangaId = UrlUtils.mangaIdFromUrl(taggedManga.url) ?: return
+        preferences.slugMap = preferences.slugMap + (mangaId.toInt() to slug)
+        taggedManga.url = mangaId
+        cacheManager.updateMangaCache(mangaId, taggedManga.title, slug)
+    }
+
+    private fun fetchMangaDetailsBySlug(slug: String): SManga {
+        val dto = fetchMangaDtoBySlug(slug)
+        cacheManager.updateMangaCache(dto)
+        return dto.toSMangaDetails(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
+    }
+
+    private fun fetchMangaDtoBySlug(slug: String): MangaDto {
+        val response = client.newCall(GET("$baseUrl/api/series/$slug?type=comic", headers)).execute()
+        val body = response.body.string()
+        if (apiHelper.isErrorPage(response.code, body)) throw Exception("Error al obtener detalles de Olympus")
+        return json.decodeMangaDetailPayload(body)
+    }
+
+    private fun fetchMangaDetailsByScraping(
+        slug: String,
+        preferredMangaId: String?,
+        preferredTitle: String?,
+    ): SManga {
+        val document = client.newCall(GET("$baseUrl/series/comic-$slug", headers)).execute().asJsoup()
+        val title = document.selectFirst("h1")?.text()?.trim().orEmpty().ifBlank { preferredTitle ?: slug }
+        val id = preferredMangaId
+            ?: apiHelper.resolveIdBySlug(slug, cacheManager)
+            ?: throw Exception("Unable to resolve Olympus manga ID for $title")
+        preferences.slugMap = preferences.slugMap + (id.toInt() to slug)
+        cacheManager.updateMangaCache(id, title, slug)
+        return SManga.create().apply {
+            this.title = title
+            url = id
+            thumbnail_url = document.selectFirst("img[src*=/storage/], img[src]")?.attr("abs:src")?.trim()
+            description = document.selectFirst("p")?.text()?.trim()
+        }
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
@@ -494,10 +621,7 @@ class OlympusScanlation :
         // Si la API devuelve 401, intentar scraping
         if (response.code == 401) {
             logHttpIssue("mangaDetailsParse#401", response)
-            val slug = response.request.url.toString()
-                .substringAfter("/series/comic-")
-                .substringBefore("/chapters")
-                .substringBefore("?")
+            val slug = mangaSlugFromDetailsRequest(response)
             return fetchMangaDetailsByScraping(
                 slug = slug,
                 preferredMangaId = taggedId,
@@ -516,10 +640,7 @@ class OlympusScanlation :
                 return details
             }
             // Intentar scraping como último recurso
-            val slugFromUrl = response.request.url.toString()
-                .substringAfter("/series/comic-")
-                .substringBefore("/chapters")
-                .substringBefore("?")
+            val slugFromUrl = mangaSlugFromDetailsRequest(response)
             return fetchMangaDetailsByScraping(
                 slug = slugFromUrl,
                 preferredMangaId = currentId,
@@ -527,38 +648,30 @@ class OlympusScanlation :
             )
         }
 
-        val slug =
-            response.request.url
-                .toString()
-                .substringAfter("/series/comic-")
-                .substringBefore("/chapters")
-                .substringBefore("?")
-        val details = fetchMangaDetailsBySlug(slug)
-        updateTaggedMangaUrl(response, slug)
+        val dto = json.decodeMangaDetailPayload(body)
+        cacheManager.updateMangaCache(dto)
+        val resolvedId = resolveStableId(dto.slug, dto.name, dto.id?.toString())
+        val details = dto.toSMangaDetails(resolvedId)
+        updateTaggedMangaUrl(response, dto.slug)
         return details
     }
+
+    private fun mangaSlugFromDetailsRequest(response: Response): String = UrlUtils
+        .mangaSlugFromUrl(response.request.url.toString())
+        ?: throw Exception("Unable to parse Olympus manga slug from ${response.request.url}")
 
     override fun getChapterUrl(chapter: SChapter): String {
         val (mangaId, chapterIdentifier) = parseChapterIds(chapter.url)
         val parsedId = parseMangaId(mangaId)
-        val mangaSlug = preferences.slugMap[parsedId] ?: throw Exception("Slug not found for manga $parsedId")
+        val mangaSlug = resolveSlugForMangaId(parsedId)
         val backendChapterId = resolveChapterId(mangaId, chapterIdentifier, mangaSlug)
         return "$baseUrl/capitulo/$backendChapterId/comic-$mangaSlug"
-    }
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
-        fetchSeriesList()
-        return super.fetchChapterList(manga)
-            .onErrorReturn { error ->
-                Log.w(TAG, "Failed to fetch API chapters for manga ${manga.url}, falling back to HTML", error)
-                fetchChapterListFromHtml(manga)
-            }
     }
 
     override fun chapterListRequest(manga: SManga): Request {
         val mangaId = normalizedMangaId(manga.url)
         val parsedId = parseMangaId(mangaId)
-        val mangaSlug = preferences.slugMap[parsedId] ?: throw Exception("Slug not found for manga $parsedId")
+        val mangaSlug = resolveSlugForMangaId(parsedId, manga.title)
 
         return paginatedChapterListRequest(mangaSlug, mangaId, 1)
     }
@@ -566,20 +679,54 @@ class OlympusScanlation :
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable
         .fromCallable {
             resolveAndUpdateMangaSlug(manga)
-        }.flatMap {
-            client
-                .newCall(chapterListRequest(manga))
-                .asObservable()
-                .map { response -> chapterListParse(response) }
+        }.map {
+            client.newCall(chapterListRequest(manga)).execute().use { response -> chapterListParse(response) }
+        }.onErrorReturn { error ->
+            Log.w(TAG, "Failed to fetch API chapters for manga ${manga.url}, falling back to HTML", error)
+            fetchChapterListFromHtml(manga)
         }
+
+    private fun resolveAndUpdateMangaSlug(manga: SManga) {
+        val mangaId = UrlUtils.mangaIdFromUrl(manga.url) ?: return
+        val slug = apiHelper.resolveSlugForManga(manga, cacheManager) ?: UrlUtils.mangaSlugFromUrl(manga.url) ?: return
+        preferences.slugMap = preferences.slugMap + (mangaId.toInt() to slug)
+        manga.url = mangaId
+        cacheManager.updateMangaCache(mangaId, manga.title, slug)
+    }
 
     private fun paginatedChapterListRequest(
         mangaUrl: String,
+        mangaId: String,
         page: Int,
     ): Request = GET(
         url = "$dashboardApiBaseUrl/api/series/$mangaUrl/chapters?page=$page&direction=desc&type=comic",
         headers = headers,
-    )
+    ).newBuilder()
+        .tag(String::class.java, mangaId)
+        .build()
+
+    private fun fetchChapterListBySlug(
+        slug: String,
+        mangaId: String,
+    ): List<SChapter> = client
+        .newCall(paginatedChapterListRequest(slug, mangaId, 1))
+        .execute()
+        .use { chapterListParse(it) }
+
+    private fun fetchChapterListByScraping(
+        slug: String,
+        preferredMangaId: String?,
+    ): List<SChapter> {
+        val mangaId = preferredMangaId
+            ?: apiHelper.resolveIdBySlug(slug, cacheManager)
+            ?: throw Exception("Unable to resolve Olympus manga ID for $slug")
+        return fetchChapterListFromHtml(
+            SManga.create().apply {
+                title = cacheManager.getMangaTitleById(mangaId) ?: slug
+                url = mangaId
+            },
+        )
+    }
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val body = response.body.string()
@@ -601,7 +748,7 @@ class OlympusScanlation :
             if (match != null) {
                 cacheManager.updateMangaCache(match)
                 updateTaggedMangaUrl(response, match.slug)
-                return fetchChapterListBySlug(match.slug, match.id?.toString() ?: currentId)
+                return fetchChapterListBySlug(match.slug, match.id?.toString() ?: currentId ?: match.slug)
             }
             // Intentar scraping como último recurso
             val slugFromUrl = response.request.url.toString().substringAfter("/series/").substringBefore("/chapters")
@@ -613,11 +760,12 @@ class OlympusScanlation :
                 .toString()
                 .substringAfter("/series/")
                 .substringBefore("/chapters")
+        val mangaId = response.request.tag(String::class.java) ?: apiHelper.resolveIdBySlug(slug, cacheManager) ?: slug
         val data = json.decodeFromString<PayloadChapterDto>(body)
         var resultSize = data.data.size
         var page = 2
         while (data.meta.total > resultSize) {
-            val newRequest = paginatedChapterListRequest(slug, page)
+            val newRequest = paginatedChapterListRequest(slug, mangaId, page)
             val newResponse = client.newCall(newRequest).execute()
             val newBody = newResponse.body.string()
             if (apiHelper.isErrorPage(newResponse.code, newBody)) {
@@ -637,13 +785,12 @@ class OlympusScanlation :
             chapterNameToIdCache = chapterNameToIdCache + cacheUpdates
         }
 
-        return data.data.map { it.toSChapter(mangaId, dateFormat) }
+        return data.data.map { it.toSChapter(slug, dateFormat, mangaId) }
     }
 
     private fun fetchChapterListFromHtml(manga: SManga): List<SChapter> {
         val mangaId = normalizedMangaId(manga.url)
-        val slug = preferences.slugMap[parseMangaId(mangaId)]
-            ?: throw Exception("Slug no encontrado para el manga $mangaId")
+        val slug = resolveSlugForMangaId(parseMangaId(mangaId), manga.title)
         val pageUrl = "$baseUrl/series/comic-$slug"
 
         val document = client.newCall(GET(pageUrl, headers)).execute().asJsoup()
@@ -728,34 +875,30 @@ class OlympusScanlation :
     override fun pageListRequest(chapter: SChapter): Request {
         val (mangaId, chapterIdentifier) = parseChapterIds(chapter.url)
         val parsedId = parseMangaId(mangaId)
-        val mangaSlug = preferences.slugMap[parsedId] ?: throw Exception("Slug not found for manga $parsedId")
+        val mangaSlug = resolveSlugForMangaId(parsedId)
         val backendChapterId = resolveChapterId(mangaId, chapterIdentifier, mangaSlug)
 
         return GET("$baseUrl/api/capitulo/comic-$mangaSlug/$backendChapterId", headers)
     }
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable
-        .fromCallable {
-            val slugFromUrl = UrlUtils.chapterSlugFromUrl(chapter.url)
-            val mangaId = UrlUtils.chapterMangaIdFromUrl(chapter.url) ?: cacheManager.getMangaIdBySlug(slugFromUrl)
-            val resolvedSlug =
-                if (mangaId != null) {
-                    apiHelper.resolveSlugById(mangaId, cacheManager.getMangaTitleById(mangaId), cacheManager) ?: slugFromUrl
-                } else {
-                    slugFromUrl
-                }
-            if (resolvedSlug != slugFromUrl && resolvedSlug.isNotBlank()) {
-                chapter.url = chapter.url.replace(Regex("comic-[^/?]+"), "comic-$resolvedSlug")
-                if (mangaId != null) {
-                    cacheManager.updateMangaCache(mangaId, cacheManager.getMangaTitleById(mangaId), resolvedSlug)
-                }
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
+        val slugFromUrl = UrlUtils.chapterSlugFromUrl(chapter.url)
+        val mangaId = UrlUtils.chapterMangaIdFromUrl(chapter.url) ?: cacheManager.getMangaIdBySlug(slugFromUrl)
+        val resolvedSlug =
+            if (mangaId != null) {
+                apiHelper.resolveSlugById(mangaId, cacheManager.getMangaTitleById(mangaId), cacheManager) ?: slugFromUrl
+            } else {
+                slugFromUrl
             }
-        }.flatMap {
-            client
-                .newCall(pageListRequest(chapter))
-                .asObservable()
-                .map { response -> pageListParse(response) }
+        if (resolvedSlug != slugFromUrl && resolvedSlug.isNotBlank()) {
+            chapter.url = chapter.url.replace(Regex("comic-[^/?]+"), "comic-$resolvedSlug")
+            if (mangaId != null) {
+                cacheManager.updateMangaCache(mangaId, cacheManager.getMangaTitleById(mangaId), resolvedSlug)
+            }
         }
+    }.map {
+        client.newCall(pageListRequest(chapter)).execute().use { response -> pageListParse(response) }
+    }
 
     override fun pageListParse(response: Response): List<Page> {
         val body = response.body.string()
@@ -775,9 +918,20 @@ class OlympusScanlation :
         }
     }
 
-    private fun getChapterIdFromUrl(url: String): String? = url.substringAfter("/chapters/").substringBefore("?").substringBefore("/")
+    private fun getChapterIdFromUrl(url: String): String? = when {
+        "/api/capitulo/comic-" in url -> url.substringAfterLast("/").substringBefore("?")
+        "/chapters/" in url -> url.substringAfter("/chapters/").substringBefore("?").substringBefore("/")
+        "/capitulo/" in url -> url.substringAfter("/capitulo/").substringBefore("/").substringBefore("?")
+        else -> null
+    }?.takeIf { it.isNotBlank() }
 
     private fun getMangaSlugFromUrl(url: String): String? {
+        if ("/api/capitulo/comic-" in url) {
+            return url.substringAfter("/api/capitulo/comic-").substringBefore("/").substringBefore("?")
+        }
+        if ("/capitulo/" in url && "/comic-" in url) {
+            return url.substringAfter("/comic-").substringBefore("/").substringBefore("?")
+        }
         val match = Regex("/series/([^/]+)/chapters").find(url)
         return match?.groupValues?.getOrNull(1)
     }
@@ -826,31 +980,15 @@ class OlympusScanlation :
     }
 
     private var cachedBaseUrl: String? = null
-    private var SharedPreferences.prefBaseUrl: String
-        get() {
-            if (cachedBaseUrl == null) {
-                cachedBaseUrl = getString("overrideBaseUrl", defaultBaseUrl)!!
-            }
-            return cachedBaseUrl!!
+    private fun getPrefBaseUrl(): String {
+        if (cachedBaseUrl == null) {
+            cachedBaseUrl = preferences.getString("overrideBaseUrl", defaultBaseUrl)!!
         }
-        set(value) {
-            cachedBaseUrl = value
-            edit().putString("overrideBaseUrl", value).apply()
-        }
-
-    private fun SharedPreferences.fetchDomainPref() = getBoolean("fetchDomain", true)
-
-    companion object {
-        private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
+        return cachedBaseUrl!!
     }
 
-        private const val FETCH_DOMAIN_PREF = "fetchDomain"
-        private const val FETCH_DOMAIN_PREF_DEFAULT = true
-
-        private const val SLUG_MAP = "slugMap"
-
-        private const val TAG = "OlympusScanlation"
-
-        private const val CACHE_DURATION_MS = 60 * 60 * 1000L // 1 hour
+    private fun setPrefBaseUrl(value: String) {
+        cachedBaseUrl = value
+        preferences.edit().putString("overrideBaseUrl", value).apply()
     }
 }

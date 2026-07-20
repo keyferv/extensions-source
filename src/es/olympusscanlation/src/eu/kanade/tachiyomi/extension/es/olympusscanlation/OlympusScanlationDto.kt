@@ -57,6 +57,26 @@ class SeriesDto(
     @Serializable(with = FlexibleMangaListSerializer::class)
     val data: List<MangaDto>,
     val last_page: Int,
+) {
+    fun hasNextPage() = current_page < last_page
+}
+
+@Serializable
+class HomepageDto(
+    val data: HomepageDataDto,
+    val rankings: List<HomepageMangaDto>? = null,
+)
+
+@Serializable
+class HomepageDataDto(
+    @SerialName("new_chapters") val newChapters: List<HomepageMangaDto>? = null,
+)
+
+@Serializable
+class HomepageMangaDto(
+    val id: Int,
+    val slug: String,
+    val type: String? = null,
 )
 
 @Serializable
@@ -79,13 +99,7 @@ class MangaDto(
     fun toSManga(resolvedId: String? = id?.toString()) = SManga.create().apply {
         title = name.trim()
         val cleanSlug = slug.trim().removeSuffix("/")
-        // URL canónica compatible con biblioteca y migración: slug + mangaId.
-        url =
-            if (!resolvedId.isNullOrBlank()) {
-                "/series/comic-$cleanSlug?mangaId=$resolvedId"
-            } else {
-                "/series/comic-$cleanSlug"
-            }
+        url = resolvedId ?: "/series/comic-$cleanSlug"
         thumbnail_url = cover?.trim()
     }
 
@@ -125,13 +139,7 @@ class LatestMangaDto(
     fun toSManga(resolvedId: String? = id?.toString()) = SManga.create().apply {
         title = name.trim()
         val cleanSlug = slug.trim().removeSuffix("/")
-        // URL canónica compatible con biblioteca y migración: slug + mangaId.
-        url =
-            if (!resolvedId.isNullOrBlank()) {
-                "/series/comic-$cleanSlug?mangaId=$resolvedId"
-            } else {
-                "/series/comic-$cleanSlug"
-            }
+        url = resolvedId ?: "/series/comic-$cleanSlug"
         thumbnail_url = cover?.trim()
     }
 }
@@ -215,8 +223,8 @@ class PayloadChapterDto(
 
 @Serializable
 class ChapterDto(
-    private val id: Int,
-    private val name: String,
+    internal val id: Int,
+    internal val name: String,
     @SerialName("published_at") private val date: String,
 ) {
     fun toSChapter(

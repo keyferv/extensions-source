@@ -3,11 +3,19 @@ package eu.kanade.tachiyomi.extension.es.olympusscanlation
 import eu.kanade.tachiyomi.source.model.SManga
 
 object UrlUtils {
-    fun mangaSlugFromUrl(url: String): String? = url
-        .substringAfter("/series/comic-", "")
-        .substringBefore("/")
-        .substringBefore("?")
-        .takeIf { it.isNotBlank() }
+    fun mangaSlugFromUrl(url: String): String? {
+        val value = when {
+            "/series/comic-" in url -> url.substringAfter("/series/comic-")
+            "/api/series/" in url -> url.substringAfter("/api/series/")
+            url.startsWith("comic-") -> url.removePrefix("comic-")
+            else -> url
+        }
+
+        return value
+            .substringBefore("/")
+            .substringBefore("?")
+            .takeIf { it.isNotBlank() && !it.startsWith("http") }
+    }
 
     fun mangaIdFromUrl(url: String): String? {
         val paramId =
