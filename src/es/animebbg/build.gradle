@@ -1,0 +1,9 @@
+ext {
+    extName = 'AnimeBBG'
+    extClass = '.AnimeBBG'
+    baseUrl = 'https://animebbg.net'
+    extVersionCode = 7
+    isNsfw = false
+}
+
+apply plugin: "kei.plugins.extension.legacy"

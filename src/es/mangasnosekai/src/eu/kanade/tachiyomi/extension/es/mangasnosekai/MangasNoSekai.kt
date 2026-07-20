@@ -3,11 +3,10 @@ package eu.kanade.tachiyomi.extension.es.mangasnosekai
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.annotation.Source
-import keiyoushi.network.rateLimit
 import kotlinx.serialization.decodeFromString
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -17,16 +16,19 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
-import kotlin.time.Duration.Companion.seconds
 
-@Source
-abstract class MangasNoSekai : Madara() {
-    override val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es"))
+class MangasNoSekai :
+    Madara(
+        "Mangas No Sekai",
+        "https://mangasnosekai.com",
+        "es",
+        SimpleDateFormat("MMMM dd, yyyy", Locale("es")),
+    ) {
 
     override val useLoadMoreRequest = LoadMoreStrategy.Never
 
     override val client = super.client.newBuilder()
-        .rateLimit(2, 1.seconds) { it.host == baseUrl.toHttpUrl().host }
+        .rateLimitHost(baseUrl.toHttpUrl(), 2, 1)
         .build()
 
     override val useNewChapterEndpoint = true

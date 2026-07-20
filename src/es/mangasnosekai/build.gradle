@@ -1,0 +1,28 @@
+ext {
+    extName = 'Mangas No Sekai'
+    extClass = '.MangasNoSekai'
+    themePkg = 'madara'
+    baseUrl = 'https://mangasnosekai.com'
+    overrideVersionCode = 19
+    isNsfw = false
+}
+
+apply plugin: "kei.plugins.extension.legacy"
+
+dependencies {
+    implementation(project(":lib:synchrony"))
+    testImplementation(project(":core"))
+    testImplementation(libs.jsoup)
+    testImplementation(libs.kotlin.json)
+    testImplementation(libs.okhttp)
+    testImplementation("junit:junit:4.13.2")
+}
+
+android {
+    sourceSets {
+        test {
+            java.srcDirs = ['test']
+            kotlin.srcDirs = ['test']
+        }
+    }
+}

@@ -1,41 +1,47 @@
 package eu.kanade.tachiyomi.extension.es.jeazscans
 
 import android.util.Base64
-import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
-import java.util.Calendar
 import java.util.Locale
 
-@Source
-abstract class JeazScans : Madara() {
-    override val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale("es"))
+class JeazScans :
+    Madara(
+        "Jeaz Scans",
+        "https://lectorhub.j5z.xyz",
+        "es",
+        dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale("es")),
+    ) {
+    override val id = 5292079548510508306
 
     override val useNewChapterEndpoint = true
 
+    override val baseUrl = "https://lectorhub.j5z.xyz"
+
+    override val lang = "es"
+
     override val supportsLatest = true
+
+    override val versionId = 2
 
     override val client: OkHttpClient = network.client.newBuilder()
         .rateLimit(2)
         .build()
 
-    private val relativeDateFormat by lazy {
+    private val dateFormat by lazy {
         SimpleDateFormat("dd MMM, yyyy", Locale.US)
     }
 
@@ -130,7 +136,7 @@ abstract class JeazScans : Madara() {
         }
     }
 
-    override fun parseChapterDate(date: String?): Long {
+    private fun parseChapterDate(date: String?): Long {
         if (date.isNullOrEmpty()) return 0L
         val lowercaseDate = date.lowercase()
         return when {
@@ -154,7 +160,7 @@ abstract class JeazScans : Madara() {
             lowercaseDate.contains("hoy") -> {
                 Calendar.getInstance().timeInMillis
             }
-            else -> relativeDateFormat.tryParse(date)
+            else -> dateFormat.tryParse(date)
         }
     }
 

@@ -1,0 +1,10 @@
+ext {
+    extName = 'BarManga'
+    extClass = '.BarManga'
+    themePkg = 'madara'
+    baseUrl = 'https://libribar.com'
+    overrideVersionCode = 15
+    isNsfw = true
+}
+
+apply plugin: "kei.plugins.extension.legacy"
