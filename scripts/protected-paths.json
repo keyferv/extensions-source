@@ -38,10 +38,6 @@
       "note": "Local version maintained"
     },
     {
-      "path": "src/es/rncalation",
-      "note": "New extension for rncalation.online (Knight No Scanlation + Traducciones Amistosas merge)"
-    },
-    {
       "path": "src/es/mantrazscan",
       "note": "Local custom source migrated to current Mantraz Scan Next.js site"
     },
