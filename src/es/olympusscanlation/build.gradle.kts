@@ -6,15 +6,13 @@ plugins {
 
 keiyoushi {
     name = "Olympus Scanlation"
-    versionCode = 21
+    versionCode = 26
     contentWarning = ContentWarning.SAFE
     libVersion = "1.4"
 
     source {
         lang = "es"
-        baseUrl {
-            custom("https://olympusxyz.com")
-        }
-        versionId = 3
+        baseUrl = "https://olympusxyz.com"
+        versionId = 5
     }
 }
