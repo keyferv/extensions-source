@@ -23,7 +23,7 @@ try {
     $response = Invoke-WebRequest -Uri $baseUrl -UseBasicParsing -TimeoutSec 15
     Assert ($response.StatusCode -eq 200) "Sitio responde HTTP 200"
     Assert ($response.Content.Length -gt 0) "Contenido no vacío"
-    
+
     $html = $response.Content
     $hasMangaRefs = $html -match "manhua|manhwa|manga|capítulo|lector"
     Assert $hasMangaRefs "HTML contiene referencias a contenido manga/manhua"
@@ -39,7 +39,7 @@ try {
     $html = $doc.Content
     $hasMadara = $html -match "wp-manga|madara|page-item-detail|manga-item|manhua|manhwa"
     Assert $hasMadara "HTML contiene selectores típicos de contenido"
-    
+
     $hasChapters = $html -match "chapter|capítulo|wp-manga-chapter"
     Assert $hasChapters "HTML contiene referencias a capítulos"
 } catch {
@@ -52,7 +52,7 @@ try {
     $buildGradle = Get-Content "src/es/jeazscans/build.gradle" -Raw
     $hasCorrectUrl = $buildGradle -match "lectorhub.j5z.xyz"
     Assert $hasCorrectUrl "build.gradle contiene URL correcta (lectorhub.j5z.xyz)"
-    
+
     $ktFile = Get-Content "src/es/jeazscans/src/eu/kanade/tachiyomi/extension/es/jeazscans/JeazScans.kt" -Raw
     $hasUrlInKt = $ktFile -match "lectorhub.j5z.xyz"
     Assert $hasUrlInKt "JeazScans.kt contiene URL correcta"

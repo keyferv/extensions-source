@@ -32,7 +32,7 @@ try {
     $data = Fetch-Json "$baseUrl/api/series/list"
     Assert ($data.data -ne $null) "Respuesta contiene campo 'data'"
     Assert ($data.data.Count -gt 0) "Lista contiene $($data.data.Count) series"
-    
+
     $first = $data.data[0]
     Assert ($first.id -ne $null) "Primera serie tiene 'id'"
     Assert ($first.name -ne $null -and $first.name -ne "") "Primera serie tiene 'name'"
@@ -48,7 +48,7 @@ try {
     $list = Fetch-Json "$baseUrl/api/series/list"
     $slug = $list.data[0].slug
     Write-Host "  Probando slug: $slug" -ForegroundColor Gray
-    
+
     $detail = Fetch-Json "$baseUrl/api/series/$slug`?type=comic"
     Assert ($detail.data -ne $null) "Detalle contiene 'data'"
     Assert ($detail.data.id -ne $null) "Detalle tiene 'id'"
@@ -65,7 +65,7 @@ try {
     $list = Fetch-Json "$baseUrl/api/series/list"
     $slug = $list.data[0].slug
     Write-Host "  Probando capítulos para: $slug" -ForegroundColor Gray
-    
+
     $chapters = Fetch-Json "$dashboardUrl/api/series/$slug/chapters?page=1"
     Assert ($chapters.data -ne $null) "Capítulos contienen 'data'"
     $count = $chapters.data.Count
@@ -88,7 +88,7 @@ try {
     Assert ($search.data.series.data -ne $null) "Contiene 'data.series.data'"
     $count = $search.data.series.data.Count
     Assert ($count -gt 0) "series.data contiene $count elementos"
-    
+
     $first = $search.data.series.data[0]
     Assert ($first.name -ne $null) "Elemento tiene 'name'"
     Assert ($first.slug -ne $null) "Elemento tiene 'slug'"
@@ -106,7 +106,7 @@ try {
         $target = $list.data[0]
     }
     Write-Host "  Objetivo: id=$($target.id), name='$($target.name)', slug='$($target.slug)'" -ForegroundColor Gray
-    
+
     # Verificar que el slug resuelve capítulos
     $chapters = Fetch-Json "$dashboardUrl/api/series/$($target.slug)/chapters?page=1"
     Assert ($chapters.data -ne $null) "Slug resuelve a capítulos"
