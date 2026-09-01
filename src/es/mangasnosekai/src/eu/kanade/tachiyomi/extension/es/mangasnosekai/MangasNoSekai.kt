@@ -1,14 +1,20 @@
 package eu.kanade.tachiyomi.extension.es.mangasnosekai
 
+import android.content.Intent
+import android.util.Log
+import androidx.preference.CheckBoxPreference
+import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.lib.synchrony.Deobfuscator
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.asJsoup
+import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -22,15 +28,181 @@ import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class MangasNoSekai : Madara() {
+abstract class MangasNoSekai :
+    Madara(),
+    ConfigurableSource {
     override val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es"))
     private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
+    private val preferences = getPreferences()
+    private val diagnosticLock = Any()
+    private var diagnosticRequestCount = 0L
+    private var diagnosticFirstRequestAt = 0L
+    private var diagnosticLastRequestAt = 0L
+    private var diagnosticFirst429Request = 0L
+    private var diagnosticActiveRequests = 0
+    private var diagnosticMaxConcurrentRequests = 0
+
+    private val isRateLimitDiagnosticEnabled: Boolean
+        get() = preferences.getBoolean(RATE_LIMIT_DIAGNOSTIC, false)
 
     override val useLoadMoreRequest = LoadMoreStrategy.Never
 
     override val client = super.client.newBuilder()
-        .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
+        .addInterceptor { chain ->
+            if (!isRateLimitDiagnosticEnabled) {
+                return@addInterceptor chain.proceed(chain.request())
+            }
+
+            val requestStartedAt = System.nanoTime()
+            val requestNumber: Long
+            val elapsedSincePreviousRequest: Long
+            val activeRequests: Int
+
+            synchronized(diagnosticLock) {
+                requestNumber = ++diagnosticRequestCount
+                elapsedSincePreviousRequest = if (diagnosticLastRequestAt == 0L) {
+                    0L
+                } else {
+                    requestStartedAt - diagnosticLastRequestAt
+                }
+                diagnosticFirstRequestAt = if (diagnosticFirstRequestAt == 0L) {
+                    requestStartedAt
+                } else {
+                    diagnosticFirstRequestAt
+                }
+                diagnosticLastRequestAt = requestStartedAt
+                activeRequests = ++diagnosticActiveRequests
+                diagnosticMaxConcurrentRequests = maxOf(
+                    diagnosticMaxConcurrentRequests,
+                    activeRequests,
+                )
+            }
+
+            val response = chain.proceed(chain.request())
+            val responseAt = System.nanoTime()
+
+            synchronized(diagnosticLock) {
+                diagnosticActiveRequests--
+                val elapsedSinceFirstRequest = responseAt - diagnosticFirstRequestAt
+                val requestDuration = responseAt - requestStartedAt
+                val requestsPerMinute = if (elapsedSinceFirstRequest > 0L) {
+                    diagnosticRequestCount * 60_000_000_000.0 / elapsedSinceFirstRequest
+                } else {
+                    0.0
+                }
+                val requestsPerSecond = requestsPerMinute / 60.0
+                val endpoint = response.request.url
+                Log.d(
+                    RATE_LIMIT_TAG,
+                    "Request #$requestNumber → ${response.code} | " +
+                        "Δt=${elapsedSincePreviousRequest / 1_000_000}ms | " +
+                        "duration=${requestDuration / 1_000_000}ms | " +
+                        "concurrent=$activeRequests | maxConcurrent=$diagnosticMaxConcurrentRequests | " +
+                        "rate=${"%.2f".format(Locale.ROOT, requestsPerSecond)} req/s " +
+                        "(${"%.1f".format(Locale.ROOT, requestsPerMinute)} req/min) | " +
+                        "endpoint=$endpoint",
+                )
+                appendDiagnosticLog(
+                    "Request #$requestNumber → ${response.code} | " +
+                        "Δt=${elapsedSincePreviousRequest / 1_000_000}ms | " +
+                        "duration=${requestDuration / 1_000_000}ms | " +
+                        "concurrent=$activeRequests | maxConcurrent=$diagnosticMaxConcurrentRequests | " +
+                        "rate=${"%.2f".format(Locale.ROOT, requestsPerSecond)} req/s " +
+                        "(${"%.1f".format(Locale.ROOT, requestsPerMinute)} req/min) | " +
+                        "endpoint=$endpoint",
+                )
+
+                if (response.code == HTTP_TOO_MANY_REQUESTS) {
+                    val retryAfter = response.header("Retry-After")
+                    if (diagnosticFirst429Request == 0L) {
+                        diagnosticFirst429Request = requestNumber
+                        Log.d(
+                            RATE_LIMIT_TAG,
+                            "Primer 429: request #$requestNumber | " +
+                                "tiempo transcurrido=${elapsedSinceFirstRequest / 1_000_000_000.0}s | " +
+                                "rate=${"%.2f".format(Locale.ROOT, requestsPerSecond)} req/s " +
+                                "(${"%.1f".format(Locale.ROOT, requestsPerMinute)} req/min) | " +
+                                "endpoint=$endpoint | " +
+                                "Retry-After=${retryAfter ?: "ausente"}",
+                        )
+                        appendDiagnosticLog(
+                            "Primer 429: request #$requestNumber | " +
+                                "tiempo transcurrido=${elapsedSinceFirstRequest / 1_000_000_000.0}s | " +
+                                "rate=${"%.2f".format(Locale.ROOT, requestsPerSecond)} req/s " +
+                                "(${"%.1f".format(Locale.ROOT, requestsPerMinute)} req/min) | " +
+                                "endpoint=$endpoint | " +
+                                "Retry-After=${retryAfter ?: "ausente"}",
+                        )
+                    } else {
+                        Log.d(
+                            RATE_LIMIT_TAG,
+                            "429 adicional: request #$requestNumber | endpoint=$endpoint | " +
+                                "Retry-After=${retryAfter ?: "ausente"}",
+                        )
+                        appendDiagnosticLog(
+                            "429 adicional: request #$requestNumber | endpoint=$endpoint | " +
+                                "Retry-After=${retryAfter ?: "ausente"}",
+                        )
+                    }
+                }
+            }
+
+            response
+        }
+        .rateLimit(1, 3.seconds) { it.host == baseUrlHost }
         .build()
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        CheckBoxPreference(screen.context).apply {
+            key = RATE_LIMIT_DIAGNOSTIC
+            title = "Diagnóstico de rate limit HTTP"
+            summary = "Registra solicitudes, concurrencia, tiempos y respuestas 403/429"
+            setDefaultValue(false)
+            setOnPreferenceChangeListener { _, _ ->
+                resetRateLimitDiagnostics()
+                true
+            }
+        }.also(screen::addPreference)
+
+        CheckBoxPreference(screen.context).apply {
+            title = "Exportar diagnóstico de rate limit"
+            summary = "Comparte el historial guardado de solicitudes y respuestas"
+            setOnPreferenceClickListener {
+                isChecked = false
+                exportRateLimitDiagnostics(screen)
+                true
+            }
+        }.also(screen::addPreference)
+    }
+
+    private fun appendDiagnosticLog(line: String) {
+        val currentLog = preferences.getString(RATE_LIMIT_LOG, "").orEmpty()
+        val updatedLog = (currentLog + line + "\n").takeLast(MAX_RATE_LIMIT_LOG_LENGTH)
+        preferences.edit().putString(RATE_LIMIT_LOG, updatedLog).apply()
+    }
+
+    private fun exportRateLimitDiagnostics(screen: PreferenceScreen) {
+        val log = preferences.getString(RATE_LIMIT_LOG, "").orEmpty()
+        val exportIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Mangas No Sekai - diagnóstico de rate limit")
+            putExtra(Intent.EXTRA_TEXT, log.ifEmpty { "No hay solicitudes registradas." })
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        screen.context.startActivity(Intent.createChooser(exportIntent, "Exportar diagnóstico"))
+    }
+
+    private fun resetRateLimitDiagnostics() {
+        synchronized(diagnosticLock) {
+            diagnosticRequestCount = 0L
+            diagnosticFirstRequestAt = 0L
+            diagnosticLastRequestAt = 0L
+            diagnosticFirst429Request = 0L
+            diagnosticActiveRequests = 0
+            diagnosticMaxConcurrentRequests = 0
+            preferences.edit().remove(RATE_LIMIT_LOG).apply()
+        }
+    }
 
     override val useNewChapterEndpoint = true
 
@@ -201,6 +373,12 @@ abstract class MangasNoSekai : Madara() {
     override fun pageListRequest(chapter: SChapter): Request = super.pageListRequest(chapter.apply { url = "$url/" })
 
     companion object {
+        private const val HTTP_TOO_MANY_REQUESTS = 429
+        private const val RATE_LIMIT_DIAGNOSTIC = "rateLimitDiagnostic"
+        private const val RATE_LIMIT_LOG = "rateLimitDiagnosticLog"
+        private const val RATE_LIMIT_TAG = "MangasNoSekaiRL"
+        private const val MAX_RATE_LIMIT_LOG_LENGTH = 256 * 1024
+
         val ACTION_REGEX = """function\s+.*?[\s\S]*?\.ajax;?[\s\S]*?(?:'?url'?:\s*'([^']*)')(?:[\s\S]*?'?data'?:\s*\{([^}]*)\})?""".toRegex()
         val OBJECTS_REGEX = """\s*'?(\w+)'?\s*:\s*(?:(?:'([^']*)'|([^,\r\n]+))\s*,?\s*)""".toRegex()
         val MANGA_ID_REGEX = """\"manga_id"\s*:\s*"(.*)\"""".toRegex()

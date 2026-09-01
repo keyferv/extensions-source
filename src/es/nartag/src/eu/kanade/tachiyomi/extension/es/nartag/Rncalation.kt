@@ -7,9 +7,9 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.asJsoup
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -89,20 +89,57 @@ abstract class Rncalation : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga {
         val document = response.asJsoup()
         return SManga.create().apply {
-            description = document.selectFirst("div.comic-page-wrap p[class*=text-][^data-astro-cid]")?.text() ?: ""
+            // Description is a stable paragraph: <p class="text-[1.1rem] text-[var(--color-text1)] leading-[1.8] max-w-[48rem] m-0">
+            description = document.select("p").firstOrNull {
+                val cls = it.attr("class")
+                cls.contains("text-[1.1rem]") && cls.contains("max-w-[48rem]")
+            }?.text()?.trim()
+                ?: document.selectFirst("p[class*='text-[1.1rem]']")?.text()?.trim()
+                ?: document.selectFirst("div.comic-page-wrap p")?.text()?.trim()
+                ?: ""
 
-            val badges = document.select("span.inline-flex.items-center.rounded").map { it.text().lowercase() }
+            // Status and genres are sibling spans inside <div class="flex flex-wrap items-center justify-center md:justify-start gap-1.5">
+            // inside the main detail content wrapper.
+            val metaContainer = document.select("div").firstOrNull { el ->
+                val cls = el.attr("class")
+                cls.contains("flex") && cls.contains("flex-wrap") && cls.contains("gap-1.5") && el.selectFirst("span") != null
+            }
+
+            val rawSpans = metaContainer?.select("span")?.map { it.text().trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+
+            fun isStatusText(text: String): Boolean {
+                val t = text.lowercase().replace("í", "i").replace("á", "a").replace("é", "e").replace("ó", "o").trim()
+                return t == "completado" || t == "complet" || t == "finalizado" ||
+                    t == "en curso" || t == "en emision" || t == "emision" || t == "curso" ||
+                    t == "pausa" || t == "en pausa" || t == "hiatus" ||
+                    t == "cancelado" || t == "cancelled" || t == "ongoing" || t == "completed" ||
+                    t.contains("completado") || t.contains("finalizado") || t.contains("completed") ||
+                    t.contains("en curso") || t.contains("emision") || t.contains("ongoing") ||
+                    t.contains("pausa") || t.contains("hiatus") ||
+                    t.contains("cancelado") || t.contains("cancelled")
+            }
+
+            val statusText = rawSpans.firstOrNull { isStatusText(it) }
+                ?.lowercase()?.replace("í", "i")?.replace("á", "a")?.replace("é", "e")?.replace("ó", "o")
+
             status = when {
-                badges.any { it.contains("emisión") || it.contains("curso") || it.contains("ongoing") } -> SManga.ONGOING
-                badges.any { it.contains("completado") || it.contains("completed") } -> SManga.COMPLETED
-                badges.any { it.contains("pausa") || it.contains("hiatus") } -> SManga.ON_HIATUS
-                badges.any { it.contains("cancelado") || it.contains("cancelled") } -> SManga.CANCELLED
+                statusText == null -> SManga.UNKNOWN
+                statusText.contains("completado") || statusText.contains("completed") || statusText.contains("finalizado") -> SManga.COMPLETED
+                statusText.contains("emision") || statusText.contains("curso") || statusText.contains("ongoing") -> SManga.ONGOING
+                statusText.contains("pausa") || statusText.contains("hiatus") -> SManga.ON_HIATUS
+                statusText.contains("cancelado") || statusText.contains("cancelled") -> SManga.CANCELLED
                 else -> SManga.UNKNOWN
             }
 
-            genre = document.select("span.inline-flex.items-center.rounded")
-                .filter { it.text().lowercase() !in listOf("emisión", "completado", "pausa", "cancelado") }
-                .joinToString(", ") { it.text() }
+            val genreCandidates = rawSpans.filterNot { isStatusText(it) }
+            genre = if (genreCandidates.isNotEmpty()) {
+                genreCandidates.joinToString(", ") { it }
+            } else {
+                // Fallback to legacy badge selector, still excluding status
+                document.select("span.inline-flex.items-center.rounded")
+                    .filterNot { isStatusText(it.text()) }
+                    .joinToString(", ") { it.text().trim() }
+            }
 
             val groupName = document.selectFirst("a[href^='/groups/']")?.text()
             if (!groupName.isNullOrEmpty()) {
@@ -140,13 +177,82 @@ abstract class Rncalation : HttpSource() {
 
     private fun chapterListRequest(slug: String, page: Int) = GET("$baseUrl/comics/$slug/chapters?page=$page", headers)
 
-    override fun chapterListParse(response: Response): List<SChapter> = response.asJsoup().select("a[data-chapter-id]").mapIndexed { num, it ->
-        SChapter.create().apply {
-            setUrlWithoutDomain(it.attr("href"))
-            chapter_number = it.attr("data-chapter-num").toFloatOrNull() ?: num.toFloat()
-            name = it.attr("data-chapter-label").trim().ifEmpty { "Capítulo ${chapter_number.toInt()}" }
-            date_upload = it.selectFirst(".text-\\[0\\.65rem\\]")?.let { parseDate(it.text()) } ?: 0L
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val document = response.asJsoup()
+        // Free chapters have data-chapter-id; premium/locked ones link to /auth/login
+        // and carry data-chapter-num / data-chapter-label but may lack data-chapter-id.
+        // Use a combined selector so locked chapters are not dropped.
+        var elements = document.select("a[data-chapter-num], a[data-chapter-id]")
+        if (elements.isEmpty()) {
+            elements = document.select("a[href*=\"/auth/login\"]")
         }
+
+        return elements.mapIndexed { num, el ->
+            SChapter.create().apply {
+                val rawHref = el.attr("href")
+                val absoluteHref = el.absUrl("href").ifEmpty { rawHref }
+                val isPremium = rawHref.contains("/auth/login") ||
+                    absoluteHref.contains("/auth/login") ||
+                    el.selectFirst("[class*=coin], [class*=Coin]") != null ||
+                    el.text().contains("coin", ignoreCase = true) ||
+                    el.attr("data-chapter-label").contains("coin", ignoreCase = true)
+
+                // Preserve original chapter route when available (redirect param).
+                // Otherwise keep the login URL so premium entries remain visible.
+                // Free chapters keep their reader URL unchanged.
+                val effectiveUrl = if (isPremium) {
+                    val premiumPath = extractRedirectPath(absoluteHref) ?: absoluteHref
+                    "$premiumPath#premium-${el.attr("data-chapter-num").ifBlank { num.toString() }}"
+                } else {
+                    absoluteHref
+                }
+                setUrlWithoutDomain(effectiveUrl)
+
+                chapter_number = el.attr("data-chapter-num").toFloatOrNull() ?: num.toFloat()
+
+                val rawLabel = el.attr("data-chapter-label").trim()
+                val fallbackText = el.text().trim()
+                var baseName = when {
+                    rawLabel.isNotEmpty() -> rawLabel
+                    fallbackText.isNotEmpty() -> fallbackText
+                    else -> "Capítulo ${chapter_number.toInt()}"
+                }
+
+                if (isPremium) {
+                    // Ensure a clear lock/coin marker is visible in the chapter list.
+                    if (!baseName.contains("\uD83D\uDD12")) {
+                        val coinBadge = el.select("span").firstOrNull { it.text().trim().matches(Regex("\\d+")) }?.text()?.trim()
+                            ?: Regex("(\\d+)\\s*coin", RegexOption.IGNORE_CASE).find(baseName)?.groupValues?.getOrNull(1)
+                        baseName = if (coinBadge != null && !baseName.contains("coin", ignoreCase = true)) {
+                            "\uD83D\uDD12 $baseName ($coinBadge coin)"
+                        } else {
+                            "\uD83D\uDD12 $baseName"
+                        }
+                    }
+                }
+
+                name = baseName
+                date_upload = el.selectFirst(".text-\\[0\\.65rem\\]")?.let { parseDate(it.text()) } ?: 0L
+            }
+        }
+    }
+
+    private fun extractRedirectPath(href: String): String? {
+        // href may be absolute or relative like /auth/login?redirect=%2Fcomics%2F...
+        return try {
+            val httpUrl = href.toHttpUrl()
+            httpUrl.queryParameter("redirect")
+        } catch (_: Exception) {
+            // Fallback manual parsing for relative URLs
+            val idx = href.indexOf("redirect=")
+            if (idx == -1) return null
+            val encoded = href.substring(idx + "redirect=".length).substringBefore("&")
+            try {
+                java.net.URLDecoder.decode(encoded, "UTF-8")
+            } catch (_: Exception) {
+                encoded
+            }
+        }?.takeIf { it.isNotEmpty() }
     }
 
     override fun pageListParse(response: Response): List<Page> {
