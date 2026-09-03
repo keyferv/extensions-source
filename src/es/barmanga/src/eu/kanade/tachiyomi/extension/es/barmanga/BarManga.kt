@@ -4,23 +4,26 @@ import android.util.Base64
 import android.util.Log
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
+import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
+import keiyoushi.utils.asJsoup
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.io.ByteArrayInputStream
 import java.net.URL
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.zip.ZipInputStream
 
 @Source
 abstract class BarManga : Madara() {
-    override val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ROOT)
-
-    override val useLoadMoreRequest = LoadMoreStrategy.Always
+    override val chapterDateFormat = DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.ENGLISH)
 
     override val filterNonMangaItems = false
 
@@ -30,14 +33,32 @@ abstract class BarManga : Madara() {
 
     override val chapterUrlSelector = "a.ch-link"
 
+    override fun archiveManga(element: Element, id: String): SManga? {
+        val manga = super.archiveManga(element, id) ?: return null
+        val href = element.selectFirst(archiveUrlSelector)?.attr("abs:href").orEmpty()
+        val path = runCatching { href.toHttpUrl().encodedPath }.getOrNull()
+
+        if (path.isNullOrBlank()) {
+            Log.w(TAG, "archive manga=${manga.title}: unable to resolve path, keeping numeric id=$id")
+            return manga
+        }
+
+        manga.url = path
+        Log.d(TAG, "archive manga=${manga.title}: id=$id url=$path")
+        return manga
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val document = client.get(url).asJsoup()
+        val id = document.mangaId() ?: return null
+        return parseDetails(document, id, preserveUrl = url.encodedPath).apply { initialized = true }
+    }
+
     // Caché en memoria para los ZIP de capítulos descargados
     private val chapterCache = mutableMapOf<String, Map<Int, ByteArray>>()
 
-    override val client: OkHttpClient by lazy {
-        super.client.newBuilder()
-            .addInterceptor(BarMangaInterceptor(chapterCache))
-            .build()
-    }
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(BarMangaInterceptor(chapterCache))
 
     // Breadcrumb título en página de detalle
     override val mangaDetailsSelectorTitle = ".breadcrumb > li:last-child > a"
@@ -45,10 +66,16 @@ abstract class BarManga : Madara() {
     private val imageSegmentsRegex = """var\s+imageSegments\s*=\s*\[\s*(['"][A-Za-z0-9+/=]+['"](?:\s*,\s*['"][A-Za-z0-9+/=]+['"])*)\s*];""".toRegex()
     private val base64ItemRegex = """['"]([A-Za-z0-9+/=]+)['"]""".toRegex()
 
-    override fun pageListParse(document: Document): List<Page> {
-        launchIO { countViews(document) }
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val chapterUrl = getChapterUrl(chapter)
+        val first = fetchChapterDocument(chapterUrl)
+        val document = if (first.selectFirst("#single-pager") != null) {
+            client.get(chapterUrl.toHttpUrl().newBuilder().addQueryParameter("style", "list").build()).asJsoup()
+        } else {
+            first
+        }
 
-        Log.d(TAG, "pageListParse start url=${document.location()}")
+        Log.d(TAG, "getPageList start url=${document.location()}")
 
         // ── 1. PRIMARIO: imágenes directas en page-break (método estándar Madara) ──
         val directPages = parseDirectImages(document)
@@ -81,7 +108,7 @@ abstract class BarManga : Madara() {
      * PRIMARIO: Parsea <img> directos dentro de div.page-break.
      * Es el método estándar de Madara y lo que el sitio usa actualmente.
      */
-    private fun parseDirectImages(document: Document): List<Page> {
+    private fun parseDirectImages(document: org.jsoup.nodes.Document): List<Page> {
         val pages = mutableListOf<Page>()
         val pageBreaks = document.select(pageListParseSelector)
         Log.d(TAG, "parseDirectImages: ${pageBreaks.size} page-breaks found in ${document.location()}")
@@ -120,7 +147,7 @@ abstract class BarManga : Madara() {
      * FALLBACK: Descarga ZIP bundle con nonce/bundleAction/chapterKey.
      * El sitio usaba esto antes de junio 2026. Se mantiene por si lo reactivan.
      */
-    private fun parseZipBundle(document: Document): List<Page> {
+    private suspend fun parseZipBundle(document: org.jsoup.nodes.Document): List<Page> {
         val scriptData = document.select("script")
             .map { it.data() }
             .find { it.contains("const _cfg") && it.contains("bundleAction") } ?: return emptyList()
@@ -146,22 +173,21 @@ abstract class BarManga : Madara() {
                 .build()
 
             val endpointUrl = endpoint.toHttpUrl()
-            val request = Request.Builder()
-                .url(endpointUrl)
-                .headers(xhrHeaders)
-                .header("Origin", baseUrl)
-                .header("Referer", document.location())
-                .header("Accept", "*/*")
-                .header("Sec-Fetch-Site", "same-origin")
-                .header("Sec-Fetch-Mode", "cors")
-                .header("Sec-Fetch-Dest", "empty")
-                .post(multipart)
+            val postHeaders = headersBuilder()
+                .set("Origin", baseUrl)
+                .set("Referer", document.location())
+                .set("Accept", "*/*")
+                .set("Sec-Fetch-Site", "same-origin")
+                .set("Sec-Fetch-Mode", "cors")
+                .set("Sec-Fetch-Dest", "empty")
+                .set("X-Requested-With", "XMLHttpRequest")
                 .build()
 
-            val response = client.newCall(request).execute()
+            val response = client.post(endpointUrl, postHeaders, multipart, ensureSuccess = false)
             if (!response.isSuccessful) {
+                val code = response.code
                 response.close()
-                Log.w(TAG, "ZIP: response code=${response.code}")
+                Log.w(TAG, "ZIP: response code=$code")
                 return emptyList()
             }
 
@@ -194,7 +220,7 @@ abstract class BarManga : Madara() {
      * FALLBACK: Decodifica imageSegments (Base64 en scripts dentro de page-break).
      * Método legacy que algunos sitios Madara aún usan.
      */
-    private fun parseImageSegments(document: Document): List<Page> {
+    private fun parseImageSegments(document: org.jsoup.nodes.Document): List<Page> {
         val pages = mutableListOf<Page>()
         val seenUrls = mutableSetOf<String>()
         var segmentsFound = 0
@@ -225,7 +251,7 @@ abstract class BarManga : Madara() {
      * FALLBACK: Imágenes estáticas en div.reading-content fuera de page-break.
      * Último recurso cuando ninguno de los métodos anteriores funciona.
      */
-    private fun parseStaticImages(document: Document): List<Page> {
+    private fun parseStaticImages(document: org.jsoup.nodes.Document): List<Page> {
         val pages = mutableListOf<Page>()
         val seenUrls = mutableSetOf<String>()
         var totalImgs = 0

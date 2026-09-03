@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "BarManga"
-    versionCode = 15
+    versionCode = 18
     contentWarning = ContentWarning.NSFW
-    libVersion = "1.4"
+    libVersion = "1.6"
     theme = "madara"
 
     source {
