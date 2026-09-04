@@ -1,85 +1,72 @@
 package eu.kanade.tachiyomi.extension.es.mhscans
 
-import android.app.Application
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.EditTextPreference
-import androidx.preference.PreferenceScreen
+import android.util.Log
 import eu.kanade.tachiyomi.multisrc.madara.Madara
-import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Page
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.asJsoup
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
-import java.text.SimpleDateFormat
+import org.jsoup.nodes.Element
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class MHScans :
-    Madara(),
-    ConfigurableSource {
-    override val baseUrl: String
-        get() = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
+abstract class MHScans : Madara() {
 
-    override val dateFormat = SimpleDateFormat("dd 'de' MMMM 'de' yyyy", Locale("es"))
+    override val chapterDateFormat = DateTimeFormatter.ofPattern("dd 'de' MMMM 'de' yyyy", Locale.forLanguageTag("es"))
 
-    override val client: OkHttpClient = super.client.newBuilder()
-        .rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
-        .build()
+    override fun OkHttpClient.Builder.configureClient() = rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
 
-    override val useNewChapterEndpoint = true
-    override val useLoadMoreRequest = LoadMoreStrategy.Always
+    override val chapterMode = ChapterMode.MangaAjax
+
     override val sendViewCount = false
 
-    private val defaultBaseUrl = "https://mhscans.com"
-    private val preferences: SharedPreferences by lazy {
-        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
-    }
+    override fun archiveManga(element: Element, id: String): SManga? {
+        val manga = super.archiveManga(element, id) ?: return null
+        val href = element.selectFirst(archiveUrlSelector)?.attr("abs:href").orEmpty()
+        val path = runCatching { href.toHttpUrl().encodedPath }.getOrNull()
 
-    override fun pageListParse(document: Document): List<Page> {
-        super.pageListParse(document).also {
-            if (it.isNotEmpty()) return it
+        if (path.isNullOrBlank()) {
+            Log.w(TAG, "archive manga=${manga.title}: unable to resolve path, keeping numeric id=$id")
+            return manga
         }
 
+        manga.url = path
+        Log.d(TAG, "archive manga=${manga.title}: id=$id url=$path")
+        return manga
+    }
+
+    override suspend fun fetchChapterDocument(chapterUrl: String): Document {
+        val document = client.get(chapterUrl).asJsoup()
         document.selectFirst("form#rk_madara_redirect[method=post]")?.let { form ->
-            val url = form.attr("action")
+            val url = form.attr("abs:action").ifEmpty { form.attr("action") }
+            val body = FormBody.Builder().apply {
+                form.select("input").forEach { input ->
+                    add(input.attr("name"), input.attr("value"))
+                }
+            }.build()
             val headers = headersBuilder().set("Referer", document.location()).build()
-            val body = FormBody.Builder()
-            form.select("input").forEach {
-                body.add(it.attr("name"), it.attr("value"))
-            }
-            return pageListParse(client.newCall(POST(url, headers, body.build())).execute().asJsoup())
+            return client.post(url, headers, body).asJsoup()
         }
+        return document
+    }
 
-        return document.select("div.rk-page-wrap img, img.rk-img").mapIndexed { i, img ->
-            Page(i, imageUrl = img.attr("abs:src").ifEmpty { img.attr("abs:data-src") })
+    override fun parsePages(document: Document): List<Page> {
+        super.parsePages(document).takeIf { it.isNotEmpty() }?.let { return it }
+        return document.select("div.rk-page-wrap img, img.rk-img").mapIndexed { index, img ->
+            Page(index, imageUrl = img.attr("abs:src").ifEmpty { img.attr("abs:data-src") })
         }
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = BASE_URL_PREF
-            title = "Editar URL de la fuente"
-            summary = "Para uso temporal, si la extensión se actualiza se perderá el cambio."
-            dialogTitle = "Editar URL de la fuente"
-            dialogMessage = "URL por defecto:\n$defaultBaseUrl"
-            setDefaultValue(defaultBaseUrl)
-            setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, "Reinicie la aplicación para aplicar los cambios", Toast.LENGTH_LONG).show()
-                true
-            }
-        }.also { screen.addPreference(it) }
-    }
-
-    companion object {
-        private const val BASE_URL_PREF = "overrideBaseUrl"
+    private companion object {
+        const val TAG = "MHScans"
     }
 }
