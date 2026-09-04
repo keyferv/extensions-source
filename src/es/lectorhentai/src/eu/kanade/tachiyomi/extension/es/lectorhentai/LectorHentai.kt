@@ -1,96 +1,75 @@
 package eu.kanade.tachiyomi.extension.es.lectorhentai
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import rx.Observable
 
 @Source
-abstract class LectorHentai : HttpSource() {
-    override val name = "LectorHentai"
-    override val supportsLatest = true
-    override val baseUrl = "https://lectorhentai.com"
+abstract class LectorHentai : KeiSource() {
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(2)
-        .build()
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Referer", "$baseUrl/")
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-
-    // POPULARES
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/${if (page > 1) "?page=$page" else ""}", headers)
+    override fun okhttp3.OkHttpClient.Builder.configureClient(): okhttp3.OkHttpClient.Builder = rateLimit(2)
 
     private fun popularMangaSelector() = "div.bs.styletere"
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
-        val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
-        return MangasPage(mangas, hasNextPage)
-    }
+    private fun popularMangaNextPageSelector() = "a.r, a:contains(Siguiente)"
 
     private fun popularMangaFromElement(element: Element) = SManga.create().apply {
         element.selectFirst("a[title]")?.let { link ->
             setUrlWithoutDomain(link.attr("href"))
             title = element.selectFirst("div.tt")?.text()?.trim() ?: link.attr("title")
         }
-        // Manejar lazy loading: data-original o src
         thumbnail_url = element.selectFirst("img")?.let { img ->
             img.attr("abs:data-original").ifEmpty {
                 img.attr("abs:src")
             }
         }?.let { url ->
-            // Asegurar que tenga protocolo
             if (url.startsWith("//")) "https:$url" else url
         }
     }
 
-    private fun popularMangaNextPageSelector() = "a.r, a:contains(Siguiente)"
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val url = if (page > 1) "$baseUrl/?page=$page" else baseUrl
+        val document = client.get(url).asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
+        return MangasPage(mangas, hasNextPage)
+    }
 
-    // RECIENTES
-    override fun latestUpdatesRequest(page: Int) = popularMangaRequest(page)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getPopularManga(page)
 
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
-
-    // BÚSQUEDA
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        val url = query.trim().toHttpUrlOrNull()
-        if (url != null && url.host.removePrefix("www.") == baseUrl.toHttpUrl().host) {
-            val path = url.encodedPath
-            if (path.startsWith("/manga/")) {
-                return Observable.just(MangasPage(listOf(createMangaFromPath(path)), false))
-            }
+    override suspend fun getMangaByUrl(url: okhttp3.HttpUrl): SManga? {
+        if (url.host.removePrefix("www.") != baseUrl.toHttpUrl().host) return null
+        val path = url.encodedPath
+        if (path.startsWith("/manga/")) {
+            return createMangaFromPath(path)
         }
+        return null
+    }
 
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         if (query.startsWith(PREFIX_ID_SEARCH)) {
             val path = query.removePrefix(PREFIX_ID_SEARCH).let {
                 if (it.startsWith("/")) it else "/manga/$it"
             }
-            return Observable.just(MangasPage(listOf(createMangaFromPath(path)), false))
+            return MangasPage(listOf(createMangaFromPath(path)), false)
         }
 
-        return super.fetchSearchManga(page, query, filters)
-    }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = "$baseUrl/tipo/all".toHttpUrl().newBuilder()
             .addQueryParameter("s", query)
             .addQueryParameter("page", page.toString())
@@ -110,10 +89,11 @@ abstract class LectorHentai : HttpSource() {
             }
         }
 
-        return GET(url.build(), headers)
+        val document = client.get(url.build()).asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
+        return MangasPage(mangas, hasNextPage)
     }
-
-    override fun searchMangaParse(response: Response) = popularMangaParse(response)
 
     private fun createMangaFromPath(path: String) = SManga.create().apply {
         setUrlWithoutDomain(path)
@@ -121,9 +101,6 @@ abstract class LectorHentai : HttpSource() {
             .replace('-', ' ')
             .replaceFirstChar { it.titlecase() }
     }
-
-    // DETALLES
-    override fun mangaDetailsParse(response: Response): SManga = mangaDetailsParse(response.asJsoup())
 
     private fun mangaDetailsParse(document: Document) = SManga.create().apply {
         document.selectFirst("div.infomanga, div.bigcontent")?.let { info ->
@@ -137,20 +114,13 @@ abstract class LectorHentai : HttpSource() {
         }
     }
 
-    // CAPÍTULOS
     private fun chapterListSelector() = "div.releases a.leer, div.eplister li"
 
-    override fun chapterListParse(response: Response): List<SChapter> = response.asJsoup()
-        .select(chapterListSelector())
-        .map { chapterFromElement(it) }
-
     private fun chapterFromElement(element: Element) = SChapter.create().apply {
-        // Si es un botón "Leer Manga" (en la página de descripción)
         if (element.tagName() == "a" && element.hasClass("leer")) {
             setUrlWithoutDomain(element.attr("href"))
             name = "Capítulo Único"
         } else {
-            // Si es una lista de capítulos
             element.selectFirst("a")?.let { link ->
                 setUrlWithoutDomain(link.attr("href"))
                 name = link.selectFirst("div.chapternum")?.text() ?: link.attr("title")
@@ -158,21 +128,42 @@ abstract class LectorHentai : HttpSource() {
         }
     }
 
-    // PÁGINAS
-    override fun pageListParse(response: Response): List<Page> = pageListParse(response.asJsoup())
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get("$baseUrl${manga.url}").asJsoup()
+        val updatedManga = if (fetchDetails) {
+            mangaDetailsParse(document).apply {
+                url = manga.url
+            }
+        } else {
+            manga
+        }
+        val updatedChapters = if (fetchChapters) {
+            document.select(chapterListSelector()).map { chapterFromElement(it) }
+        } else {
+            chapters
+        }
+        return SMangaUpdate(updatedManga, updatedChapters)
+    }
+
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get("$baseUrl${chapter.url}").asJsoup()
+        return pageListParse(document)
+    }
 
     private fun pageListParse(document: Document): List<Page> {
         val html = document.html()
 
-        // Las imágenes están en un JSON dentro de ts_reader.run()
-        // Buscar el array de imágenes en el script
         val imagesRegex = Regex(""""images"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
         val imagesMatch = imagesRegex.find(html)
 
         if (imagesMatch != null) {
             val imagesJson = imagesMatch.groupValues[1]
 
-            // Extraer todas las URLs de imágenes del JSON
             val imageUrlRegex = Regex(""""(//[^"]+\.(?:webp|jpg|png|jpeg))"""")
             val imageUrls = imageUrlRegex.findAll(imagesJson)
                 .map { it.groupValues[1] }
@@ -186,7 +177,6 @@ abstract class LectorHentai : HttpSource() {
             }
         }
 
-        // Fallback: intentar construir URLs basándose en el patrón
         val chapterIdRegex = Regex("/read/(\\d+)/")
         val chapterId = chapterIdRegex.find(document.location())?.groupValues?.get(1)
 
@@ -195,7 +185,6 @@ abstract class LectorHentai : HttpSource() {
             val totalPages = selectPaged?.select("option")?.size ?: 0
 
             if (totalPages > 0) {
-                // Buscar una imagen de ejemplo en el JSON para determinar el formato
                 val sampleImgRegex = Regex("""img(\d*)\.giolandscaping\.com/library/$chapterId/(\d+)\.(webp|jpg|png|jpeg)""")
                 val sampleMatch = sampleImgRegex.find(html)
 
@@ -216,14 +205,13 @@ abstract class LectorHentai : HttpSource() {
         return emptyList()
     }
 
-    // FILTROS
     private class GenreFilter(name: String) : Filter.CheckBox(name)
 
     private class GenreList(genres: List<GenreFilter>) : Filter.Group<GenreFilter>("Géneros", genres)
 
     private class OrderByFilter(name: String, orderValues: Array<String>) : Filter.Select<String>(name, orderValues)
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         GenreList(getGenreList()),
         OrderByFilter("Ordenar por", arrayOf("Últimos Agregados", "A-Z", "Z-A", "Populares")),
     )
