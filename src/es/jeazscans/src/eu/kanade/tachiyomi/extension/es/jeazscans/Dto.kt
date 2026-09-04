@@ -56,7 +56,7 @@ class ChaptersApiChapter(
         }
 
         val resolvedNumber = chapterNumber
-            ?: title?.let { CHAPTER_TITLE_NUMBER_REGEX.find(it)?.groupValues?.getOrNull(1)?.toFloatOrNull() }
+            ?: title?.let { CHAPTER_TITLE_NUMBER_REGEX.find(it)?.value?.toFloatOrNull() }
             ?: id?.toFloat()
         val baseName = title?.takeIf { it.isNotBlank() }
             ?: resolvedNumber?.let { "Chapter ${it.toString().removeSuffix(".0")}" }

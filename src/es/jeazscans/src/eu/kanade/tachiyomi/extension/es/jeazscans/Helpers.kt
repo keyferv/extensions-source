@@ -260,10 +260,10 @@ internal const val MAX_CHAPTER_PAGES = 100
  * `next_offset` does not advance past the current offset. [maxPages] prevents
  * unbounded loops.
  */
-internal fun walkChapterPages(
+internal suspend fun walkChapterPages(
     initialOffset: Int = 0,
     maxPages: Int = MAX_CHAPTER_PAGES,
-    fetchPage: (offset: Int) -> ChapterPage,
+    fetchPage: suspend (offset: Int) -> ChapterPage,
 ): List<ChapterPage> {
     val pages = mutableListOf<ChapterPage>()
     var offset = initialOffset

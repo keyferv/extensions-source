@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.extension.es.jeazscans
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
-import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -52,7 +51,7 @@ class WebViewInterceptor(
             resetWebView()
             bytes = fetchImage(request.url.toString())
         }
-        bytes ?: throw IOException("Failed to download page image via WebView")
+        bytes ?: throw IOException("Failed to download page image via WebView: ${errorMessage?.message ?: "timed out"}")
 
         return Response.Builder()
             .request(request)
@@ -175,17 +174,10 @@ class WebViewInterceptor(
 
         latch?.await(FETCH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
 
-        val bytes = result
-        if (bytes != null) {
-            Log.i(TAG, "WebView fetched ${bytes.size} bytes")
-        } else {
-            Log.e(TAG, "WebView image fetch failed: ${errorMessage?.message ?: "timed out"}")
-        }
-        return bytes
+        return result
     }
 
     private companion object {
-        const val TAG = "JeazScans"
         const val FETCH_TIMEOUT_SECONDS = 15L
         const val REUSE_TIMEOUT_MS = 30_000L
     }

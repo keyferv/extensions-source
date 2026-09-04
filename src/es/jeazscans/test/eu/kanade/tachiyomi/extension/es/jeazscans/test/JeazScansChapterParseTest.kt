@@ -13,9 +13,10 @@ import eu.kanade.tachiyomi.extension.es.jeazscans.extractMangaSlug
 import eu.kanade.tachiyomi.extension.es.jeazscans.extractSlugAndCap
 import eu.kanade.tachiyomi.extension.es.jeazscans.parseChapterDate
 import eu.kanade.tachiyomi.extension.es.jeazscans.parsePaymentUntil
+import eu.kanade.tachiyomi.extension.es.jeazscans.paymentUntilFormatRef
 import eu.kanade.tachiyomi.extension.es.jeazscans.walkChapterPages
 import eu.kanade.tachiyomi.source.model.SManga
-import kotlinx.serialization.decodeFromString
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import org.jsoup.Jsoup
@@ -34,6 +35,12 @@ import org.junit.Test
  * Run: ./gradlew :src:es:jeazscans:testDebugUnitTest --tests "*JeazScansChapterParseTest*"
  */
 class JeazScansChapterParseTest {
+
+    // Test-local JSON mirroring the shared instance's leniency toward unknown
+    // keys (e.g. total_count/match_count). keiyoushi.utils.jsonInstance resolves
+    // via Injekt, which is unavailable in plain JVM unit tests, while
+    // production keeps using the shared parseAs helpers untouched.
+    private val testJson = Json { ignoreUnknownKeys = true }
 
     // ── HTML builders ──────────────────────────────────────────────────────────
 
@@ -525,8 +532,6 @@ $pages
 
     // ── Chapter API JSON parsing ───────────────────────────────────────────────
 
-    private val chapterApiJson: Json = Json { ignoreUnknownKeys = true }
-
     @Test
     fun `chapter api page json parses records and pagination metadata`() {
         val payload = """
@@ -536,7 +541,7 @@ $pages
             ],"has_more":true,"next_offset":20,"total_count":34,"match_count":34}
         """.trimIndent()
 
-        val dto = chapterApiJson.decodeFromString<ChaptersPageDto>(payload)
+        val dto = testJson.decodeFromString<ChaptersPageDto>(payload)
 
         assertTrue(dto.success)
         assertEquals(2, dto.chapters.size)
@@ -577,8 +582,12 @@ $pages
         assertNotNull("Payment deadline must be parsed", chapter.paymentUntilEpoch)
     }
 
+    // SChapter.create() is an extensions-lib stub that throws on plain JVM unit
+    // tests, so locked mapping is covered via the pure toChapterData plus
+    // displayName. Production fetchAllChapters still exercises toSChapter on
+    // device, which only applies this same data to an SChapter.
     @Test
-    fun `locked api chapter materializes locked SChapter with lock-marked name`() {
+    fun `locked api chapter maps to locked ChapterData with lock-marked display name`() {
         val locked = ChaptersApiChapter(
             id = 22806,
             number = "34.00",
@@ -589,11 +598,11 @@ $pages
             paymentUntil = "2026-08-06 05:06:46",
         )
 
-        val chapter = locked.toSChapter(slug, baseUrl)
+        val chapter = locked.toChapterData(slug, baseUrl)
 
         assertNotNull(chapter)
-        assertTrue("Locked SChapter URL must stay non-readable", chapter!!.url.startsWith("$LOCKED_READER_URL/"))
-        assertEquals("Locked display name must be lock marker plus title only", "🔒 Capítulo 34", chapter.name)
+        assertTrue("Locked ChapterData URL must stay non-readable", chapter!!.readerUrl.startsWith("$LOCKED_READER_URL/"))
+        assertEquals("Locked display name must be lock marker plus title only", "🔒 Capítulo 34", chapter.displayName())
     }
 
     @Test
@@ -753,7 +762,12 @@ $pages
         val parsed = parsePaymentUntil("2026-08-06 05:06:46")
 
         assertNotNull(parsed)
-        assertTrue("Deadline must resolve to the future", parsed!! > System.currentTimeMillis())
+        assertTrue("Deadline must parse to a valid epoch", parsed!! > 0L)
+        assertEquals(
+            "Parsed deadline must round-trip through the API format",
+            "2026-08-06 05:06:46",
+            paymentUntilFormatRef.get().format(java.util.Date(parsed)),
+        )
     }
 
     @Test
@@ -768,11 +782,13 @@ $pages
     @Test
     fun `walkChapterPages fetches every page through the terminal page`() {
         val calls = mutableListOf<Int>()
-        val pages = walkChapterPages(initialOffset = 0) { offset ->
-            calls += offset
-            when (offset) {
-                0 -> ChapterPage(chapters = (1..20).map { ChaptersApiChapter(number = "$it.00") }, hasMore = true, nextOffset = 20)
-                else -> ChapterPage(chapters = (21..34).map { ChaptersApiChapter(number = "$it.00") }, hasMore = false, nextOffset = 34)
+        val pages = runBlocking {
+            walkChapterPages(initialOffset = 0) { offset ->
+                calls += offset
+                when (offset) {
+                    0 -> ChapterPage(chapters = (1..20).map { ChaptersApiChapter(number = "$it.00") }, hasMore = true, nextOffset = 20)
+                    else -> ChapterPage(chapters = (21..34).map { ChaptersApiChapter(number = "$it.00") }, hasMore = false, nextOffset = 34)
+                }
             }
         }
 
@@ -784,9 +800,11 @@ $pages
     @Test
     fun `walkChapterPages stops when a page is empty`() {
         var calls = 0
-        walkChapterPages(initialOffset = 0) {
-            calls++
-            ChapterPage(chapters = emptyList(), hasMore = true, nextOffset = 20)
+        runBlocking {
+            walkChapterPages(initialOffset = 0) {
+                calls++
+                ChapterPage(chapters = emptyList(), hasMore = true, nextOffset = 20)
+            }
         }
 
         assertEquals("Empty page must terminate the walk", 1, calls)
@@ -795,9 +813,11 @@ $pages
     @Test
     fun `walkChapterPages stops on terminal page regardless of next offset`() {
         var calls = 0
-        walkChapterPages(initialOffset = 0) {
-            calls++
-            ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = false, nextOffset = 999)
+        runBlocking {
+            walkChapterPages(initialOffset = 0) {
+                calls++
+                ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = false, nextOffset = 999)
+            }
         }
 
         assertEquals("has_more=false must terminate even with a next_offset", 1, calls)
@@ -806,9 +826,11 @@ $pages
     @Test
     fun `walkChapterPages stops when next offset is missing`() {
         var calls = 0
-        walkChapterPages(initialOffset = 0) {
-            calls++
-            ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = true, nextOffset = null)
+        runBlocking {
+            walkChapterPages(initialOffset = 0) {
+                calls++
+                ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = true, nextOffset = null)
+            }
         }
 
         assertEquals("Missing next_offset must terminate", 1, calls)
@@ -817,9 +839,11 @@ $pages
     @Test
     fun `walkChapterPages stops when next offset does not advance`() {
         var calls = 0
-        walkChapterPages(initialOffset = 0) {
-            calls++
-            ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = true, nextOffset = 0)
+        runBlocking {
+            walkChapterPages(initialOffset = 0) {
+                calls++
+                ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = true, nextOffset = 0)
+            }
         }
 
         assertEquals("Non-advancing next_offset must terminate", 1, calls)
@@ -828,9 +852,11 @@ $pages
     @Test
     fun `walkChapterPages stops within max pages on a runaway loop`() {
         var calls = 0
-        val pages = walkChapterPages(initialOffset = 0, maxPages = 5) {
-            calls++
-            ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = true, nextOffset = it + 1)
+        val pages = runBlocking {
+            walkChapterPages(initialOffset = 0, maxPages = 5) {
+                calls++
+                ChapterPage(chapters = listOf(ChaptersApiChapter(number = "1.00")), hasMore = true, nextOffset = it + 1)
+            }
         }
 
         assertTrue("Runaway responses must be bounded", calls <= 5)

@@ -8,7 +8,7 @@ keiyoushi {
     name = "Jeaz Scans"
     versionCode = 71
     contentWarning = ContentWarning.SAFE
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "es"
@@ -32,7 +32,7 @@ dependencies {
     testImplementation(project(":core"))
     testImplementation(libs.bundles.common)
     testImplementation(libs.kotlin.stdlib)
-    testImplementation(libs.tachiyomi.lib.v14)
+    testImplementation(libs.tachiyomi.lib.v16)
     testImplementation(libs.junit)
     testImplementation(libs.jsoup)
 }

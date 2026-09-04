@@ -1,20 +1,21 @@
 package eu.kanade.tachiyomi.extension.es.jeazscans
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import java.util.concurrent.TimeUnit
 
@@ -22,53 +23,32 @@ private const val JEAZ_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
 @Source
-class JeazScansSpanish(
-    override val lang: String,
-    override val id: Long,
-) : JeazScans()
+abstract class JeazScans : KeiSource() {
 
-abstract class JeazScans : HttpSource() {
-
-    override val name = "Jeaz Scans"
-
-    override val baseUrl = "https://lectorhub.j5z.xyz"
-
-    override val supportsLatest = true
-
-    // Clean client without the app's CloudflareInterceptor. Chapter images are proxied
-    // through a WebView (browser TLS fingerprint) by WebViewInterceptor, since OkHttp
-    // gets 403 from Cloudflare on /api/imagen-capitulo.
-    override val client: OkHttpClient = OkHttpClient.Builder()
-        .cookieJar(super.client.cookieJar)
-        .followRedirects(true)
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .rateLimit(2)
-        .addInterceptor(WebViewInterceptor(baseUrl, JEAZ_USER_AGENT))
-        .build()
-
-    override fun imageRequest(page: Page): Request {
-        val imageUrl = page.imageUrl ?: return super.imageRequest(page)
-        return GET(imageUrl, headers).newBuilder()
-            .header("Referer", "$baseUrl/")
-            .build()
+    // Chapter images are proxied through a WebView (browser TLS fingerprint) by
+    // WebViewInterceptor, since OkHttp gets 403 from Cloudflare on /api/imagen-capitulo.
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        connectTimeout(30, TimeUnit.SECONDS)
+        readTimeout(30, TimeUnit.SECONDS)
+        followRedirects(true)
+        rateLimit(2)
+        addInterceptor(WebViewInterceptor(baseUrl, JEAZ_USER_AGENT))
     }
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", JEAZ_USER_AGENT)
-        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-        .set("Accept-Language", "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7")
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        set("User-Agent", JEAZ_USER_AGENT)
+        set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        set("Accept-Language", "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7")
+    }
 
     // The site migrated to custom home sections and PHP routes for search.
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/", headers)
-
     // The homepage popular carousel is a finite collection (24 items); it has no
     // pagination, so hasNextPage is always false.
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val document = client.get("$baseUrl/").asJsoup()
         val mangas = document.select(".popular-carousel-shell a.popular-card[href*='manga.php?id=']")
             .mapNotNull { card ->
-                val title = card.selectFirst("strong")?.text()?.trim().orEmpty()
+                val title = card.selectFirst("strong")?.text().orEmpty()
                 if (title.isEmpty()) return@mapNotNull null
                 SManga.create().apply {
                     setUrlWithoutDomain(card.attr("abs:href"))
@@ -82,10 +62,8 @@ abstract class JeazScans : HttpSource() {
         return MangasPage(mangas, false)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/directorio.php?page=$page", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val document = client.get("$baseUrl/directorio.php?page=$page").asJsoup()
         val mangas = document.select(".directory-grid a.directory-card[href*='manga.php?id=']")
             .map { element ->
                 SManga.create().apply {
@@ -100,58 +78,79 @@ abstract class JeazScans : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst("h1.blood-title")!!.text()
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (query.isBlank()) return getLatestUpdates(page)
 
-            description = buildString {
-                val descriptionBlock = document.selectFirst("div.text-gray-200:has(h3:matchesOwn((?i)SINOPSIS))")
-                    ?: document.selectFirst("div.text-gray-200")
-                descriptionBlock?.let {
-                    append(it.ownText().ifEmpty { it.text().replace(SINOPSIS_REGEX, "") })
-                }
+        val url = "$baseUrl/ajax_search.php".toHttpUrl().newBuilder()
+            .addQueryParameter("q", query.trim())
+            .build()
+        val items = client.get(url).parseAs<List<SearchResponseItem>>()
+        return MangasPage(items.mapNotNull { it.toSManga(baseUrl) }, false)
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        if (url.encodedPath != "/manga.php") return null
+        val id = url.queryParameter("id") ?: return null
+        val manga = SManga.create().apply { this.url = "/manga.php?id=$id" }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false)
+            .manga
+            .apply { initialized = true }
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val mangaUrl = getMangaUrl(manga)
+        val document = client.get(mangaUrl).asJsoup()
+        val updatedManga = if (fetchDetails) parseMangaDetails(document, manga) else manga
+        val updatedChapters = if (fetchChapters) {
+            val mangaId = extractMangaIdFromUrl(mangaUrl)
+                ?: extractMangaIdFromScript(document)
+                ?: throw Exception("Could not extract Jeaz Scans manga id from: $mangaUrl")
+            val slug = extractMangaSlug(document)
+                ?: throw Exception("Could not extract Jeaz Scans manga slug from: $mangaUrl")
+            fetchAllChapters(mangaId, slug)
+        } else {
+            chapters
+        }
+        return SMangaUpdate(updatedManga, updatedChapters)
+    }
+
+    private fun parseMangaDetails(document: Document, manga: SManga): SManga = SManga.create().apply {
+        url = manga.url
+        title = document.selectFirst("h1.blood-title")!!.text()
+
+        description = buildString {
+            val descriptionBlock = document.selectFirst("div.text-gray-200:has(h3:matchesOwn((?i)SINOPSIS))")
+                ?: document.selectFirst("div.text-gray-200")
+            descriptionBlock?.let {
+                append(it.ownText().ifEmpty { it.text().replace(SINOPSIS_REGEX, "") })
             }
+        }
 
-            thumbnail_url = document.selectFirst("div.lg\\:col-span-3 div.cultivation-panel img")?.attr("abs:src")
+        thumbnail_url = document.selectFirst("div.lg\\:col-span-3 div.cultivation-panel img")?.attr("abs:src")
 
-            genre = document.select("a[href*='directorio.php?genero=']").joinToString { it.text() }
+        genre = document.select("a[href*='directorio.php?genero=']").joinToString { it.text() }
 
-            val statusText = document.selectFirst("span.status-badge")?.text().orEmpty().lowercase()
-            if (statusText.isNotEmpty()) {
-                status = when {
-                    statusText.contains("complet") -> SManga.COMPLETED
-                    arrayOf("pausa", "hiato").any { statusText.contains(it) } -> SManga.ON_HIATUS
-                    arrayOf("cancel", "aband").any { statusText.contains(it) } -> SManga.CANCELLED
-                    arrayOf("cultivo", "curso", "ongoing", "emision").any { statusText.contains(it) } -> SManga.ONGOING
-                    else -> SManga.UNKNOWN
-                }
+        val statusText = document.selectFirst("span.status-badge")?.text().orEmpty().lowercase()
+        if (statusText.isNotEmpty()) {
+            status = when {
+                statusText.contains("complet") -> SManga.COMPLETED
+                arrayOf("pausa", "hiato").any { statusText.contains(it) } -> SManga.ON_HIATUS
+                arrayOf("cancel", "aband").any { statusText.contains(it) } -> SManga.CANCELLED
+                arrayOf("cultivo", "curso", "ongoing", "emision").any { statusText.contains(it) } -> SManga.ONGOING
+                else -> SManga.UNKNOWN
             }
         }
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-
-        val mangaId = extractMangaIdFromUrl(response.request.url.toString())
-            ?: extractMangaIdFromScript(document)
-            ?: throw Exception("Could not extract Jeaz Scans manga id from: ${response.request.url}")
-
-        val slug = extractMangaSlug(document)
-            ?: throw Exception("Could not extract Jeaz Scans manga slug from: ${response.request.url}")
-
-        return fetchAllChapters(mangaId, slug)
-    }
-
-    private fun fetchAllChapters(mangaId: Int, slug: String): List<SChapter> {
+    private suspend fun fetchAllChapters(mangaId: Int, slug: String): List<SChapter> {
         val pages = walkChapterPages { offset ->
-            val request = buildChapterListRequest(mangaId, offset, CHAPTER_API_LIMIT)
-            val apiResponse = client.newCall(request).execute()
-            if (!apiResponse.isSuccessful) {
-                apiResponse.close()
-                throw Exception("HTTP error ${apiResponse.code} fetching chapters")
-            }
-            val dto = apiResponse.parseAs<ChaptersPageDto>()
+            val dto = client.get(chapterListUrl(mangaId, offset)).parseAs<ChaptersPageDto>()
             if (!dto.success) throw Exception("Jeaz Scans chapters API returned error")
             dto.toChapterPage()
         }
@@ -160,27 +159,20 @@ abstract class JeazScans : HttpSource() {
         }
     }
 
-    private fun buildChapterListRequest(mangaId: Int, offset: Int, limit: Int): Request {
-        val url = "$baseUrl/api_capitulos_manga.php".toHttpUrl().newBuilder()
-            .addQueryParameter("manga_id", mangaId.toString())
-            .addQueryParameter("offset", offset.toString())
-            .addQueryParameter("limit", limit.toString())
-            .addQueryParameter("orden", "desc")
-            .build()
-        return GET(url, headers)
-    }
+    private fun chapterListUrl(mangaId: Int, offset: Int): HttpUrl = "$baseUrl/api_capitulos_manga.php".toHttpUrl().newBuilder()
+        .addQueryParameter("manga_id", mangaId.toString())
+        .addQueryParameter("offset", offset.toString())
+        .addQueryParameter("limit", CHAPTER_API_LIMIT.toString())
+        .addQueryParameter("orden", "desc")
+        .build()
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         // Locked (paid) chapters carry the LOCKED_READER_URL sentinel; fail with a
         // clear message instead of constructing a request for a non-existent route.
         if (chapter.url.startsWith("$LOCKED_READER_URL/")) {
             throw Exception("This chapter is locked and requires payment on the Jeaz Scans website")
         }
-        return super.pageListRequest(chapter)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         val imageElements = document.select(
             "#pagesContainer img.reader-page-image, .page-container img.protected-img, .reader-body img, .reading-content img",
         )
@@ -201,21 +193,15 @@ abstract class JeazScans : HttpSource() {
         return fetchPagesFromApi(document)
     }
 
-    private fun fetchPagesFromApi(document: Document): List<Page> {
+    private suspend fun fetchPagesFromApi(document: Document): List<Page> {
         val (slug, cap) = extractSlugAndCap(document) ?: throw Exception("Could not extract slug/cap for API")
         val apiUrl = buildApiUrl(document.location(), slug, cap) ?: throw Exception("Could not build API URL")
 
-        val requestHeaders = headers.newBuilder()
+        val apiHeaders = headers.newBuilder()
             .set("Referer", document.location())
             .build()
 
-        val response = client.newCall(GET(apiUrl, requestHeaders)).execute()
-        if (!response.isSuccessful) {
-            response.close()
-            throw Exception("HTTP error ${response.code}")
-        }
-
-        val apiResponse = response.parseAs<ApiLectorResponse>()
+        val apiResponse = client.get(apiUrl, apiHeaders).parseAs<ApiLectorResponse>()
         if (!apiResponse.success) throw Exception("API returned error")
 
         val pages = apiResponse.paginas
@@ -226,28 +212,6 @@ abstract class JeazScans : HttpSource() {
             .distinct()
             .mapIndexed { idx, imageUrl -> Page(idx, imageUrl = imageUrl) }
     }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = if (query.isBlank()) {
-        latestUpdatesRequest(page)
-    } else {
-        val url = "$baseUrl/ajax_search.php".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query.trim())
-            .build()
-        GET(url, headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        if (!response.request.url.encodedPath.endsWith("/ajax_search.php")) {
-            return latestUpdatesParse(response)
-        }
-
-        val items = response.parseAs<List<SearchResponseItem>>()
-        val mangas = items.mapNotNull { it.toSManga(baseUrl) }
-
-        return MangasPage(mangas, false)
-    }
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
 
     companion object {
         private const val CHAPTER_API_LIMIT = 20
