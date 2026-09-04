@@ -2,126 +2,53 @@ package eu.kanade.tachiyomi.extension.es.olympusscanlation
 
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.preference.CheckBoxPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.getPreferences
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.jsonInstance
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Interceptor
-import okhttp3.Request
-import okhttp3.Response
-import rx.Observable
-import uy.kohesive.injekt.injectLazy
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class OlympusScanlation :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
-    private val fetchedDomainUrlHost by lazy { fetchedDomainUrl.toHttpUrl().host }
-    private val apiBaseUrlHost by lazy { apiBaseUrl.toHttpUrl().host }
 
-    private val isCi = System.getenv("CI") == "true"
-    private val shouldFetchDomain: Boolean get() = preferences.getBoolean("fetchDomain", true)
-
-    override val baseUrl: String get() =
-        when {
-            isCi -> defaultBaseUrl
-            shouldFetchDomain -> fetchedDomainUrl
-            else -> getPrefBaseUrl()
-        }
+    private val preferences by getPreferencesLazy()
+    private val cacheManager = MangaCacheManager(preferences)
+    private val apiHelper by lazy { ApiHelper(client, headers) }
+    private val filterManager = FilterManager()
 
     private val defaultBaseUrl: String = "https://olympusxyz.com"
-
-    private val fetchedDomainUrl: String by lazy {
-        if (!shouldFetchDomain) return@lazy getPrefBaseUrl()
-        try {
-            val initClient = network.client
-            val headers = super.headersBuilder().build()
-            val document = initClient.newCall(GET("https://olympus.pages.dev", headers)).execute().asJsoup()
-            val domain =
-                document.selectFirst("meta[property=og:url]")?.attr("content")
-                    ?: return@lazy getPrefBaseUrl()
-            val host =
-                initClient
-                    .newCall(GET(domain, headers))
-                    .execute()
-                    .request.url.host
-            val newDomain = "https://$host"
-            setPrefBaseUrl(newDomain)
-            newDomain
-        } catch (_: Exception) {
-            getPrefBaseUrl()
-        }
-    }
-
-    private val apiBaseUrl by lazy {
-        fetchedDomainUrl.replace("https://", "https://panel.")
-    }
-
-    private val publicApiBaseUrl: String get() = baseUrl
-    private val dashboardApiBaseUrl: String get() = apiBaseUrl
+    private val isCi = System.getenv("CI") == "true"
+    private val shouldFetchDomain: Boolean get() = preferences.getBoolean(FETCH_DOMAIN_PREF, FETCH_DOMAIN_PREF_DEFAULT)
 
     override val supportsLatest: Boolean = true
 
-    private val preferences: SharedPreferences = getPreferences()
-    private val cacheManager = MangaCacheManager(preferences)
-    private val apiHelper by lazy { ApiHelper(client, headersMap, dashboardApiBaseUrl) }
-    private val filterManager by lazy { FilterManager(preferences, client) }
+    override val supportsFilterFetching: Boolean = true
 
-    companion object {
-        private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
-
-        private const val FETCH_DOMAIN_PREF = "fetchDomain"
-        private const val FETCH_DOMAIN_PREF_DEFAULT = true
-
-        private const val SLUG_MAP = "slugMap"
-
-        private const val CHAPTER_COUNT_MAP = "chapterCountMap"
-
-        private const val MIN_ACCEPTED_CHAPTER_PERCENT = 70
-
-        private const val TAG = "OlympusScanlation"
-
-        private const val CACHE_DURATION_MS = 60 * 60 * 1000L // 1 hour
-
-        private val CHAPTER_COUNT_TEXT_REGEX = Regex(
-            "(\\d+)\\s+cap[ií]tulos?\\s+en\\s+total",
-            RegexOption.IGNORE_CASE,
-        )
-
-        private val CHAPTER_NUMBER_TEXT_REGEX = Regex(
-            "cap[ií]tulo\\s*(\\d+(?:\\.\\d+)?)",
-            RegexOption.IGNORE_CASE,
-        )
-    }
-
-    private val headersMap: Map<String, String>
-        get() {
-            val map = mutableMapOf<String, String>()
-            for (i in 0 until headers.size) {
-                map[headers.name(i)] = headers.value(i)
-            }
-            return map
-        }
-
-    override val client by lazy {
-        val logger = Interceptor { chain ->
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        addNetworkInterceptor { chain ->
             val request = chain.request()
             val startTime = System.currentTimeMillis()
             val response = chain.proceed(request)
@@ -129,39 +56,49 @@ abstract class OlympusScanlation :
             Log.d(TAG, "${response.code} ${request.method} ${request.url} (${duration}ms)")
             response
         }
-
-        val client = network.client.newBuilder()
-            .addNetworkInterceptor(logger)
-            .rateLimit(1, 2.seconds) { it.host == fetchedDomainUrlHost }
-            .rateLimit(2, 1.seconds) { it.host == apiBaseUrlHost }
-            .build()
-        client
+        rateLimit(1, 2.seconds) { it.host.contains("olympus", ignoreCase = true) && !it.host.startsWith("panel.") }
+        rateLimit(2, 1.seconds) { it.host.startsWith("panel.") || it.host.contains("panel.") }
     }
 
-    private val json: Json by injectLazy()
-
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
+    private suspend fun effectiveBaseUrl(): String {
+        if (isCi) return defaultBaseUrl
+        if (!shouldFetchDomain) return baseUrl
+        val stored = preferences.getString("overrideBaseUrl", defaultBaseUrl) ?: defaultBaseUrl
+        if (stored != defaultBaseUrl && stored.isNotBlank()) return baseUrl
+        return try {
+            val doc = client.get("https://olympus.pages.dev", headers, ensureSuccess = false).asJsoup()
+            val domain = doc.selectFirst("meta[property=og:url]")?.attr("content") ?: return baseUrl
+            val host = client.get(domain, headers, ensureSuccess = false).request.url.host
+            val newDomain = "https://$host"
+            if (newDomain != baseUrl && newDomain.isNotBlank()) {
+                preferences.edit().putString("overrideBaseUrl", newDomain).apply()
+                newDomain
+            } else {
+                baseUrl
+            }
+        } catch (_: Exception) {
+            baseUrl
+        }
     }
 
-    private data class MangaRefTag(val manga: SManga)
+    private suspend fun publicBaseUrl(): String = effectiveBaseUrl()
 
-    private data class MangaTitleTag(val title: String)
+    private suspend fun dashboardBaseUrl(): String = effectiveBaseUrl().replace("https://", "https://panel.")
 
     private var SharedPreferences.slugMap: Map<Int, String>
         get() = runCatching {
-            json.decodeFromString<Map<Int, String>>(getString(SLUG_MAP, "{}") ?: "{}")
+            jsonInstance.decodeFromString<Map<Int, String>>(getString(SLUG_MAP, "{}") ?: "{}")
         }.getOrDefault(emptyMap())
         set(value) {
-            edit().putString(SLUG_MAP, json.encodeToString(value)).apply()
+            edit().putString(SLUG_MAP, jsonInstance.encodeToString(value)).apply()
         }
 
     private var SharedPreferences.chapterCountMap: Map<Int, Int>
         get() = runCatching {
-            json.decodeFromString<Map<Int, Int>>(getString(CHAPTER_COUNT_MAP, "{}") ?: "{}")
+            jsonInstance.decodeFromString<Map<Int, Int>>(getString(CHAPTER_COUNT_MAP, "{}") ?: "{}")
         }.getOrDefault(emptyMap())
         set(value) {
-            edit().putString(CHAPTER_COUNT_MAP, json.encodeToString(value)).apply()
+            edit().putString(CHAPTER_COUNT_MAP, jsonInstance.encodeToString(value)).apply()
         }
 
     @Volatile
@@ -173,351 +110,198 @@ abstract class OlympusScanlation :
     @Volatile
     private var chapterNameToIdCache: Map<String, Int> = emptyMap()
 
-    @Synchronized
-    private fun fetchSeriesList() {
+    private suspend fun fetchSeriesList() {
         val now = System.currentTimeMillis()
-
-        if (seriesList.isNotEmpty() && (now - lastFetchTime) < CACHE_DURATION_MS) {
-            return
-        }
-
-        val comics = try {
-            fetchSeriesListFromListEndpoint()
+        if (seriesList.isNotEmpty() && (now - lastFetchTime) < CACHE_DURATION_MS) return
+        try {
+            val comics = fetchSeriesListFromListEndpoint()
+            synchronized(this) {
+                seriesList = comics
+                lastFetchTime = now
+            }
+            val newSlugMap = comics.mapNotNull { dto -> dto.id?.let { it to dto.slug } }.toMap()
+            preferences.slugMap = preferences.slugMap + newSlugMap + fetchHomepageSlugs()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to refresh series list, falling back to homepage slugs", e)
-            // List endpoint failed — fall back to homepage for slug updates only.
-            // Don't overwrite seriesList so search still works with previously cached data.
             try {
                 val homepageSlugs = fetchHomepageSlugs()
                 if (homepageSlugs.isNotEmpty()) {
-                    preferences.slugMap += homepageSlugs
+                    preferences.slugMap = preferences.slugMap + homepageSlugs
                 }
             } catch (homepageError: Exception) {
                 Log.w(TAG, "Failed to refresh homepage slugs", homepageError)
-                // Both endpoints down, keep existing data intact
             }
-            return
         }
-
-        seriesList = comics
-        lastFetchTime = now
-
-        val newSlugMap = comics.mapNotNull { dto -> dto.id?.let { it to dto.slug } }.toMap()
-
-        preferences.slugMap += newSlugMap + fetchHomepageSlugs()
     }
 
-    /** Fetch the cached site catalogue used by the website search dropdown. */
-    private fun fetchSeriesListFromListEndpoint(): List<MangaDto> {
-        val response = client.newCall(GET("$baseUrl/api/series/list", headers)).execute()
-        if (!response.isSuccessful) {
-            throw Exception("Failed to fetch series list: HTTP ${response.code}")
-        }
-        return json.decodeMangaListPayload(response.body.string()).filter { it.type == "comic" }
+    private suspend fun fetchSeriesListFromListEndpoint(): List<MangaDto> {
+        val base = publicBaseUrl()
+        val response = client.get("$base/api/series/list", ensureSuccess = false)
+        val body = response.body.string()
+        if (!response.isSuccessful) throw Exception("Failed to fetch series list: HTTP ${response.code}")
+        if (apiHelper.isErrorPage(response.code, body)) throw Exception("Error page for series list")
+        return jsonInstance.decodeMangaListPayload(body).filter { it.type == "comic" }
     }
 
-    private fun fetchHomepageSlugs(): Map<Int, String> = try {
-        val homepage = client.newCall(GET("$baseUrl/api/homepage", headers)).execute()
-            .parseAs<HomepageDto>()
-
+    private suspend fun fetchHomepageSlugs(): Map<Int, String> = try {
+        val base = publicBaseUrl()
+        val dto = client.get("$base/api/homepage", ensureSuccess = false).parseAs<HomepageDto>()
         val slugs = mutableMapOf<Int, String>()
-
-        homepage.data.newChapters
-            ?.filter { it.type == "comic" }
-            ?.forEach { slugs[it.id] = it.slug }
-
-        homepage.rankings
-            ?.filter { it.type == "comic" }
-            ?.forEach { slugs[it.id] = it.slug }
-
+        dto.data.newChapters?.filter { it.type == "comic" }?.forEach { slugs[it.id] = it.slug }
+        dto.rankings?.filter { it.type == "comic" }?.forEach { slugs[it.id] = it.slug }
         slugs
     } catch (e: Exception) {
         Log.w(TAG, "Failed to parse homepage slugs", e)
         emptyMap()
     }
 
-    override fun fetchPopularManga(page: Int): Observable<MangasPage> {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         fetchSeriesList()
-        return super.fetchPopularManga(page)
-    }
-
-    override fun popularMangaRequest(page: Int): Request {
-        // HTML-first strategy: directly use base site scraping
-        return GET(baseUrl, headers)
-    }
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        // HTML-first strategy: directly use existing scraping helper
         return fetchPopularMangaByScraping()
     }
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        val updatesUrl =
-            "$publicApiBaseUrl/api/new-chapters"
-                .toHttpUrl()
-                .newBuilder()
-                .addQueryParameter("page", page.toString())
-                .build()
-        return GET(updatesUrl, headers)
-    }
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val payload = response.parseAs<NewChaptersDto>()
-        val mangaList = payload.data
-            .filter { it.type == "comic" }
-            .mapNotNull { dto ->
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val base = publicBaseUrl()
+        return try {
+            val url = "$base/api/new-chapters".toHttpUrl().newBuilder().addQueryParameter("page", page.toString()).build()
+            val payload = client.get(url, ensureSuccess = false).parseAs<NewChaptersDto>()
+            val mangaList = payload.data.filter { it.type == "comic" }.mapNotNull { dto ->
                 val mangaId = dto.id ?: return@mapNotNull null
                 cacheManager.updateMangaCache(dto)
                 preferences.slugMap = preferences.slugMap + (mangaId to dto.slug)
                 dto.toSManga(mangaId.toString())
             }
-
-        return MangasPage(mangaList, hasNextPage = payload.current_page < payload.last_page)
+            MangasPage(mangaList, hasNextPage = payload.current_page < payload.last_page)
+        } catch (e: Exception) {
+            Log.w(TAG, "getLatestUpdates API failed, falling back to HTML", e)
+            fetchLatestUpdatesByScraping(page)
+        }
     }
 
-    private fun fetchPopularMangaByScraping(): MangasPage {
-        // El fallback de scraping siempre debe usar el sitio web (no dashboard API)
-        val document = client.newCall(GET(baseUrl, headers)).execute().asJsoup()
-        val section =
-            document.selectFirst("section:has(h2:matchesOwn((?i)Popular Del Dia))")
-                ?: document.selectFirst("section:has(h2:matchesOwn((?i)Popular))")
-                ?: throw Exception("No se encontró la sección de populares en la web")
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val base = publicBaseUrl()
+        if (query.isNotEmpty()) {
+            if (query.length < 3) throw Exception("La búsqueda debe tener al menos 3 caracteres")
+            if (query.toHttpUrlOrNull() != null) {
+                val byUrl = getMangaByUrl(query.toHttpUrl())
+                return if (byUrl != null) MangasPage(listOf(byUrl), false) else MangasPage(emptyList(), false)
+            }
+            val normalizedQuery = query.trim().lowercase()
+            val body = client.get("$base/api/series/list", ensureSuccess = false).body.string()
+            val mangaList = jsonInstance.decodeMangaListPayload(body).filter { it.type == "comic" }.filter { it.name.lowercase().contains(normalizedQuery) }.map { dto ->
+                cacheManager.updateMangaCache(dto)
+                dto.toSManga(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
+            }
+            return MangasPage(mangaList, hasNextPage = false)
+        }
 
-        val mangaList =
-            section.select("figure a[href^=/series/comic-], a[href^=/series/comic-]")
-                .mapNotNull { link ->
-                    val href = link.attr("href").trim()
-                    if (href.isBlank()) return@mapNotNull null
-
-                    val title =
-                        link.selectFirst("figcaption")?.text()?.trim()
-                            ?: link.attr("title").trim()
-                                .ifBlank { link.attr("aria-label").trim() }
-                                .ifBlank { link.selectFirst("img[alt]")?.attr("alt")?.trim().orEmpty() }
-                    if (title.isBlank()) return@mapNotNull null
-
-                    val imageElement =
-                        link.selectFirst("img[src]")
-                            ?: link.closest("figure")?.selectFirst("img[src]")
-                            ?: link.parent()?.selectFirst("img[src]")
-
-                    val thumbnail = imageElement?.attr("abs:src")?.trim().orEmpty()
-                    val trackedUrl = buildTrackedMangaUrlForFallback(href, title)
-
-                    SManga.create().apply {
-                        this.title = title
-                        this.url = trackedUrl
-                        this.thumbnail_url = thumbnail.ifBlank { null }
-                    }
-                }.distinctBy { it.url }
-
-        if (mangaList.isEmpty()) {
-            throw Exception("No se pudieron obtener populares via fallback HTML")
+        val urlBuilder = "$base/api/series".toHttpUrl().newBuilder()
+        filters.forEach { filter ->
+            when (filter) {
+                is SortFilter -> {
+                    if (filter.state?.ascending == true) urlBuilder.addQueryParameter("direction", "desc") else urlBuilder.addQueryParameter("direction", "asc")
+                }
+                is GenreFilter -> {
+                    if (filter.toUriPart() != 9999) urlBuilder.addQueryParameter("genres", filter.toUriPart().toString())
+                }
+                is StatusFilter -> {
+                    if (filter.toUriPart() != 9999) urlBuilder.addQueryParameter("status", filter.toUriPart().toString())
+                }
+                else -> {}
+            }
+        }
+        urlBuilder.addQueryParameter("type", "comic")
+        urlBuilder.addQueryParameter("page", page.toString())
+        val response = client.get(urlBuilder.build(), ensureSuccess = false)
+        val body = response.body.string()
+        if (response.code == 401) {
+            logHttpIssue("searchManga#401", response.code, response.request.url.toString())
+            throw Exception("Error en la búsqueda: sesión no autorizada (401)")
+        }
+        if (apiHelper.isErrorPage(response.code, body)) {
+            logHttpIssue("searchManga", response.code, response.request.url.toString())
+            throw Exception("Error en la búsqueda: respuesta HTML inesperada")
+        }
+        val mangaList = jsonInstance.decodeMangaListPayload(body).filter { it.type == "comic" }.map { dto ->
+            cacheManager.updateMangaCache(dto)
+            dto.toSManga(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
         }
         return MangasPage(mangaList, hasNextPage = false)
     }
 
-    private fun fetchLatestUpdatesByScraping(page: Int): MangasPage {
-        val updatesUrl =
-            "$baseUrl/capitulos"
-                .toHttpUrl()
-                .newBuilder()
-                .apply {
-                    if (page > 1) addQueryParameter("page", page.toString())
-                }.build()
-
-        val document = client.newCall(GET(updatesUrl, headers)).execute().asJsoup()
-
-        val primaryLinks = document.select("div.grid.md\\:grid-cols-2.gap-4 div.bg-gray-800 a[href^=/series/comic-]")
-        val links = if (primaryLinks.isNotEmpty()) primaryLinks else document.select("div.grid a[href^=/series/comic-], a[href^=/series/comic-]")
-
-        val mangaList =
-            links
-                .mapNotNull { link ->
-                    val href = link.attr("href").trim()
-                    if (href.isBlank()) return@mapNotNull null
-
-                    val title =
-                        link.selectFirst("figcaption")?.text()?.trim()
-                            ?: link.attr("title").trim()
-                                .ifBlank { link.attr("aria-label").trim() }
-                                .ifBlank { link.closest(".bg-gray-800")?.selectFirst("figcaption")?.text()?.trim().orEmpty() }
-                    if (title.isBlank()) return@mapNotNull null
-
-                    val imageElement =
-                        link.selectFirst("img[src]")
-                            ?: link.closest(".bg-gray-800")?.selectFirst("img[src]")
-                    val thumbnail = imageElement?.attr("abs:src")?.trim().orEmpty()
-                    val trackedUrl = buildTrackedMangaUrlForFallback(href, title)
-
-                    SManga.create().apply {
-                        this.title = title
-                        this.url = trackedUrl
-                        this.thumbnail_url = thumbnail.ifBlank { null }
-                    }
-                }.distinctBy { it.url }
-
-        if (mangaList.isEmpty()) {
-            throw Exception("No se pudieron obtener recientes via fallback HTML")
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val effective = try {
+            effectiveBaseUrl()
+        } catch (_: Exception) {
+            baseUrl
         }
-
-        val maxPageFromLinks =
-            document.select("a[href^=/capitulos?page=]")
-                .mapNotNull { anchor ->
-                    anchor.attr("href")
-                        .substringAfter("page=", "")
-                        .substringBefore("&")
-                        .toIntOrNull()
-                }.maxOrNull()
-
-        val nextPageFromArrow =
-            document.selectFirst(
-                "a[title*=siguiente], a[name*=siguiente], a:has(i.i-heroicons-arrow-right-20-solid)",
-            )?.attr("href")
-                ?.substringAfter("page=", "")
-                ?.substringBefore("&")
-                ?.toIntOrNull()
-
-        val hasNextPage =
-            when {
-                nextPageFromArrow != null -> nextPageFromArrow > page
-                maxPageFromLinks != null -> page < maxPageFromLinks
-                else -> mangaList.size >= 10
+        val baseHost = try {
+            baseUrl.toHttpUrl().host
+        } catch (_: Exception) {
+            ""
+        }
+        val effectiveHost = try {
+            effective.toHttpUrl().host
+        } catch (_: Exception) {
+            baseHost
+        }
+        if (url.host != baseHost && url.host != effectiveHost && !url.host.endsWith(".$effectiveHost") && !url.host.contains("olympus")) return null
+        val path = url.encodedPath
+        if (path == "/" || path == "/explorar" || path.startsWith("/explorar/")) return null
+        val slug = UrlUtils.mangaSlugFromUrl(url.toString()) ?: return null
+        if (slug.isBlank() || slug.startsWith("http")) return null
+        try {
+            apiHelper.ensureSeriesListLoaded(cacheManager, effective)
+        } catch (_: Exception) { }
+        // Try numeric ID from cache first
+        val cachedId = cacheManager.getMangaIdBySlug(slug)
+        if (cachedId != null) {
+            val title = cacheManager.getMangaTitleById(cachedId) ?: slug
+            val dto = apiHelper.resolveMangaById(cachedId, cacheManager) ?: apiHelper.resolveMangaBySlug(slug, cacheManager)
+            if (dto != null) {
+                preferences.slugMap = preferences.slugMap + (dto.id!! to dto.slug)
+                cacheManager.updateMangaCache(dto)
+                return dto.toSMangaDetails(dto.id.toString())
             }
-
-        return MangasPage(mangaList, hasNextPage = hasNextPage)
-    }
-
-    private fun buildTrackedMangaUrlForFallback(
-        href: String,
-        title: String,
-    ): String {
-        val slug = href.substringAfter("/series/comic-").substringBefore("?").substringBefore("/")
-        val match = runCatching { fetchMangaDtoBySlug(slug) }.getOrNull()
-            ?: runCatching { apiHelper.resolveMangaByName(title, null, cacheManager) }.getOrNull()
-        val id = match?.id
-        if (slug.isNotBlank() && id != null) {
-            preferences.slugMap = preferences.slugMap + (id to slug)
-            cacheManager.updateMangaCache(id.toString(), title, slug)
+            return SManga.create().apply {
+                this.title = title
+                this.url = cachedId
+                this.thumbnail_url = null
+            }
         }
-        return id?.toString() ?: "/series/comic-$slug"
+        // Resolve via API cache
+        val match = apiHelper.resolveMangaBySlug(slug, cacheManager)
+        if (match != null) {
+            preferences.slugMap = preferences.slugMap + (match.id!! to match.slug)
+            cacheManager.updateMangaCache(match)
+            return match.toSMangaDetails(match.id.toString())
+        }
+        // Fallback: try fetch details by slug directly
+        return try {
+            val base = publicBaseUrl()
+            val dto = client.get("$base/api/series/$slug?type=comic", ensureSuccess = false).let { resp ->
+                val b = resp.body.string()
+                if (apiHelper.isErrorPage(resp.code, b) || resp.code == 401) null else jsonInstance.decodeMangaDetailPayload(b)
+            } ?: return null
+            preferences.slugMap = preferences.slugMap + (dto.id!! to dto.slug)
+            cacheManager.updateMangaCache(dto)
+            dto.toSMangaDetails(dto.id.toString())
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    private fun resolveStableId(
-        slug: String,
-        name: String,
-        idString: String?,
-    ): String {
-        val id = idString?.toIntOrNull()
-            ?: apiHelper.resolveIdBySlug(slug, cacheManager)?.toIntOrNull()
-            ?: throw Exception("Unable to resolve Olympus manga ID for $name")
+    private fun resolveStableId(slug: String, name: String, idString: String?): String {
+        val id = idString?.toIntOrNull() ?: apiHelper.resolveIdBySlug(slug, cacheManager)?.toIntOrNull() ?: throw Exception("Unable to resolve Olympus manga ID for $name")
         preferences.slugMap = preferences.slugMap + (id to slug)
         cacheManager.updateMangaCache(id.toString(), name, slug)
         return id.toString()
     }
 
-    override fun searchMangaRequest(
-        page: Int,
-        query: String,
-        filters: FilterList,
-    ): Request {
-        if (query.isNotEmpty()) {
-            if (query.length < 3) {
-                throw Exception("La búsqueda debe tener al menos 3 caracteres")
-            }
-            return GET("$publicApiBaseUrl/api/series/list", headers)
-                .newBuilder()
-                .tag(String::class.java, "query:$query")
-                .build()
-        }
-
-        val url = "$publicApiBaseUrl/api/series".toHttpUrl().newBuilder()
-        filters.forEach { filter ->
-            when (filter) {
-                is SortFilter -> {
-                    if (filter.state?.ascending == true) {
-                        url.addQueryParameter("direction", "desc")
-                    } else {
-                        url.addQueryParameter("direction", "asc")
-                    }
-                }
-                is GenreFilter -> {
-                    if (filter.toUriPart() != 9999) {
-                        url.addQueryParameter("genres", filter.toUriPart().toString())
-                    }
-                }
-                is StatusFilter -> {
-                    if (filter.toUriPart() != 9999) {
-                        url.addQueryParameter("status", filter.toUriPart().toString())
-                    }
-                }
-                else -> {}
-            }
-        }
-        url.addQueryParameter("type", "comic")
-        url.addQueryParameter("page", page.toString())
-        return GET(url.build(), headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val body = response.body.string()
-        if (response.code == 401) {
-            logHttpIssue("searchMangaParse#401", response)
-            throw Exception("Error en la búsqueda: sesión no autorizada (401)")
-        }
-        if (apiHelper.isErrorPage(response.code, body)) {
-            logHttpIssue("searchMangaParse", response)
-            throw Exception("Error en la búsqueda: respuesta HTML inesperada")
-        }
-
-        val requestTag = response.request.tag(String::class.java)
-        val searchId = requestTag?.let { tag -> if (tag.startsWith("id_search:")) tag.substringAfter("id_search:") else null }
-        val searchQuery = requestTag?.let { tag -> if (tag.startsWith("query:")) tag.substringAfter("query:") else null }
-
-        if (searchId != null) {
-            val seriesList = json.decodeMangaListPayload(body)
-            val match = seriesList.firstOrNull { it.id?.toString() == searchId }
-            return if (match != null) {
-                cacheManager.updateMangaCache(match)
-                MangasPage(listOf(match.toSManga(resolveStableId(match.slug, match.name, match.id?.toString()))), false)
-            } else {
-                MangasPage(emptyList(), false)
-            }
-        }
-        if (searchQuery != null) {
-            val normalizedQuery = searchQuery.trim().lowercase()
-            val mangaList = json.decodeMangaListPayload(body)
-                .filter { it.type == "comic" }
-                .filter { it.name.lowercase().contains(normalizedQuery) }
-                .map { dto ->
-                    cacheManager.updateMangaCache(dto)
-                    dto.toSManga(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
-                }
-            return MangasPage(mangaList, hasNextPage = false)
-        }
-        if (response.request.url
-                .toString()
-                .startsWith("$publicApiBaseUrl/api/series")
-        ) {
-            val mangaList =
-                json.decodeMangaListPayload(body).filter { it.type == "comic" }.map { dto ->
-                    cacheManager.updateMangaCache(dto)
-                    dto.toSManga(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
-                }
-            return MangasPage(mangaList, hasNextPage = false)
-        }
-
-        return MangasPage(emptyList(), hasNextPage = false)
-    }
-
     private fun parseMangaId(url: String): Int {
-        // Handles: "123", "/series/comic-slug?mangaId=123", "123/456", and legacy chapter URLs.
-        val idFromParam = url.substringAfter("mangaId=", "")
-            .substringBefore("&")
-            .takeIf { it.isNotEmpty() }
+        val idFromParam = url.substringAfter("mangaId=", "").substringBefore("&").takeIf { it.isNotEmpty() }
         val rawId = idFromParam ?: url.substringBefore("/").substringBefore("?")
-        return rawId.trim().toIntOrNull()
-            ?: throw IllegalArgumentException("Unable to parse Olympus manga ID from URL: $url")
+        return rawId.trim().toIntOrNull() ?: throw IllegalArgumentException("Unable to parse Olympus manga ID from URL: $url")
     }
 
     private fun parseMangaIdOrNull(url: String): Int? = runCatching { parseMangaId(url) }.getOrNull()
@@ -531,95 +315,77 @@ abstract class OlympusScanlation :
         } else {
             url.substringAfter("/", "").substringBefore("?")
         }.normalizeChapterIdentifier()
-
-        if (chapterId.isEmpty()) {
-            throw IllegalArgumentException("Unable to parse Olympus chapter ID from URL: $url")
-        }
-
+        if (chapterId.isEmpty()) throw IllegalArgumentException("Unable to parse Olympus chapter ID from URL: $url")
         return mangaId to chapterId
     }
 
-    private fun String.normalizeChapterIdentifier(): String = trim()
-        .removePrefix("Capitulo")
-        .removePrefix("Capítulo")
-        .removePrefix("capitulo")
-        .removePrefix("capítulo")
-        .trim()
+    private fun String.normalizeChapterIdentifier(): String = trim().removePrefix("Capitulo").removePrefix("Capítulo").removePrefix("capitulo").removePrefix("capítulo").trim()
 
     override fun getMangaUrl(manga: SManga): String {
         val mangaId = parseMangaIdOrNull(manga.url)
         val slug = if (mangaId != null) {
-            resolveSlugForMangaId(mangaId, manga.title)
+            preferences.slugMap[mangaId] ?: cacheManager.getCachedSlugForId(mangaId.toString()) ?: UrlUtils.mangaSlugFromUrl(manga.url) ?: manga.url.substringBefore("?")
         } else {
             UrlUtils.mangaSlugFromUrl(manga.url) ?: throw Exception("Slug not found for manga ${manga.title}")
         }
         return "$baseUrl/series/comic-$slug"
     }
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        val mangaId = parseMangaIdOrNull(manga.url)
-        val slug = if (mangaId != null) {
-            resolveSlugForMangaId(mangaId, manga.title)
-        } else {
-            UrlUtils.mangaSlugFromUrl(manga.url) ?: throw Exception("Slug not found for manga ${manga.title}")
-        }
-
-        val apiUrl = "$baseUrl/api/series/$slug?type=comic"
-        return GET(url = apiUrl, headers = headers)
-            .newBuilder()
-            .tag(MangaRefTag::class.java, MangaRefTag(manga))
-            .tag(MangaTitleTag::class.java, MangaTitleTag(manga.title))
-            .build()
+    override fun getChapterUrl(chapter: SChapter): String = try {
+        val (mangaId, chapterIdentifier) = parseChapterIds(chapter.url)
+        val parsedId = parseMangaId(mangaId)
+        val mangaSlug = preferences.slugMap[parsedId] ?: cacheManager.getCachedSlugForId(parsedId.toString()) ?: UrlUtils.chapterSlugFromUrl(chapter.url).takeIf { it.isNotBlank() } ?: "unknown"
+        val backendChapterId = chapterNameToIdCache["$mangaId/$chapterIdentifier"]?.toString() ?: chapterIdentifier
+        "$baseUrl/capitulo/$backendChapterId/comic-$mangaSlug"
+    } catch (_: Exception) {
+        baseUrl + chapter.url
     }
 
-    private fun resolveSlugForMangaId(
-        mangaId: Int,
-        title: String? = null,
-    ): String {
+    private suspend fun resolveSlugForMangaId(mangaId: Int, title: String? = null): String {
         val id = mangaId.toString()
-        val resolvedSlug = apiHelper.resolveSlugById(id, title, cacheManager)
-        if (!resolvedSlug.isNullOrBlank()) {
-            preferences.slugMap = preferences.slugMap + (mangaId to resolvedSlug)
-            return resolvedSlug
+        try {
+            val base = publicBaseUrl()
+            apiHelper.ensureSeriesListLoaded(cacheManager, base)
+        } catch (_: Exception) { }
+        val fromHelper = apiHelper.resolveSlugById(id, title, cacheManager)
+        if (!fromHelper.isNullOrBlank()) {
+            preferences.slugMap = preferences.slugMap + (mangaId to fromHelper)
+            return fromHelper
         }
         return preferences.slugMap[mangaId] ?: throw Exception("Slug not found for manga $mangaId")
     }
 
-    private fun updateTaggedMangaUrl(
-        response: Response,
-        slug: String,
-    ) {
-        val taggedManga = response.request.tag(MangaRefTag::class.java)?.manga ?: return
+    private suspend fun updateTaggedMangaUrl(slug: String, taggedManga: SManga?) {
+        if (taggedManga == null) return
         val mangaId = UrlUtils.mangaIdFromUrl(taggedManga.url) ?: return
         preferences.slugMap = preferences.slugMap + (mangaId.toInt() to slug)
         taggedManga.url = mangaId
         cacheManager.updateMangaCache(mangaId, taggedManga.title, slug)
     }
 
-    private fun fetchMangaDetailsBySlug(slug: String): SManga {
-        val dto = fetchMangaDtoBySlug(slug)
+    private suspend fun fetchMangaDetailsBySlug(slug: String): SManga {
+        val base = publicBaseUrl()
+        val body = client.get("$base/api/series/$slug?type=comic", ensureSuccess = false).body.string()
+        if (body.isBlank()) throw Exception("Empty body for $slug")
+        val dto = jsonInstance.decodeMangaDetailPayload(body)
         cacheManager.updateMangaCache(dto)
         persistChapterCount(dto.id, dto.chapterCount, "fetchMangaDetailsBySlug")
         return dto.toSMangaDetails(resolveStableId(dto.slug, dto.name, dto.id?.toString()))
     }
 
-    private fun fetchMangaDtoBySlug(slug: String): MangaDto {
-        val response = client.newCall(GET("$baseUrl/api/series/$slug?type=comic", headers)).execute()
+    private suspend fun fetchMangaDtoBySlug(slug: String): MangaDto {
+        val base = publicBaseUrl()
+        val response = client.get("$base/api/series/$slug?type=comic", ensureSuccess = false)
         val body = response.body.string()
         if (apiHelper.isErrorPage(response.code, body)) throw Exception("Error al obtener detalles de Olympus")
-        return json.decodeMangaDetailPayload(body)
+        return jsonInstance.decodeMangaDetailPayload(body)
     }
 
-    private fun fetchMangaDetailsByScraping(
-        slug: String,
-        preferredMangaId: String?,
-        preferredTitle: String?,
-    ): SManga {
-        val document = client.newCall(GET("$baseUrl/series/comic-$slug", headers)).execute().asJsoup()
+    private suspend fun fetchMangaDetailsByScraping(slug: String, preferredMangaId: String?, preferredTitle: String?): SManga {
+        val base = publicBaseUrl()
+        val document = client.get("$base/series/comic-$slug", ensureSuccess = false).asJsoup()
         val title = document.selectFirst("h1")?.text()?.trim().orEmpty().ifBlank { preferredTitle ?: slug }
-        val id = preferredMangaId
-            ?: apiHelper.resolveIdBySlug(slug, cacheManager)
-            ?: throw Exception("Unable to resolve Olympus manga ID for $title")
+        val id = preferredMangaId ?: apiHelper.resolveIdBySlug(slug, cacheManager) ?: throw Exception("Unable to resolve Olympus manga ID for $title")
         preferences.slugMap = preferences.slugMap + (id.toInt() to slug)
         cacheManager.updateMangaCache(id, title, slug)
         return SManga.create().apply {
@@ -630,170 +396,166 @@ abstract class OlympusScanlation :
         }
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val body = response.body.string()
-        val taggedManga = response.request.tag(MangaRefTag::class.java)?.manga
-        val taggedId = taggedManga?.let { UrlUtils.mangaIdFromUrl(it.url) }
-        // Si la API devuelve 401, intentar scraping
-        if (response.code == 401) {
-            logHttpIssue("mangaDetailsParse#401", response)
-            val slug = mangaSlugFromDetailsRequest(response)
-            return fetchMangaDetailsByScraping(
-                slug = slug,
-                preferredMangaId = taggedId,
-                preferredTitle = taggedManga?.title,
-            )
+    private fun mangaSlugFromDetailsRequest(url: String): String = UrlUtils.mangaSlugFromUrl(url) ?: throw Exception("Unable to parse Olympus manga slug from $url")
+
+    override suspend fun fetchMangaUpdate(manga: SManga, chapters: List<SChapter>, fetchDetails: Boolean, fetchChapters: Boolean): SMangaUpdate {
+        val mangaId = parseMangaIdOrNull(manga.url)
+        val slug = if (mangaId != null) {
+            try {
+                resolveSlugForMangaId(mangaId, manga.title)
+            } catch (_: Exception) {
+                UrlUtils.mangaSlugFromUrl(manga.url) ?: throw Exception("Slug not found for manga ${manga.title}")
+            }
+        } else {
+            UrlUtils.mangaSlugFromUrl(manga.url) ?: throw Exception("Slug not found for manga ${manga.title}")
         }
-        if (apiHelper.isErrorPage(response.code, body)) {
-            logHttpIssue("mangaDetailsParse#errorPage", response)
-            val title = response.request.tag(MangaTitleTag::class.java)?.title
-            val currentId = taggedId
-            val match = title?.let { apiHelper.resolveMangaByName(it, currentId, cacheManager) }
+
+        if (!fetchDetails && !fetchChapters) return SMangaUpdate(manga, chapters)
+
+        // When both needed, fetch concurrently
+        return coroutineScope {
+            val detailsDeferred = if (fetchDetails) async { fetchMangaDetailsWithFallback(slug, manga) } else null
+            val chaptersDeferred = if (fetchChapters) async { fetchChapterListWithFallback(slug, manga) } else null
+
+            val updatedManga = detailsDeferred?.await() ?: manga
+            val updatedChapters = chaptersDeferred?.await() ?: chapters
+
+            SMangaUpdate(updatedManga, updatedChapters)
+        }
+    }
+
+    private suspend fun fetchMangaDetailsWithFallback(slug: String, manga: SManga): SManga {
+        val base = publicBaseUrl()
+        return try {
+            val response = client.get("$base/api/series/$slug?type=comic", ensureSuccess = false)
+            val body = response.body.string()
+            val taggedId = UrlUtils.mangaIdFromUrl(manga.url)
+            if (response.code == 401) {
+                logHttpIssue("mangaDetails#401", response.code, response.request.url.toString())
+                return fetchMangaDetailsByScraping(slug, taggedId, manga.title)
+            }
+            if (apiHelper.isErrorPage(response.code, body)) {
+                logHttpIssue("mangaDetails#errorPage", response.code, response.request.url.toString())
+                val match = manga.title.let { apiHelper.resolveMangaByName(it, taggedId, cacheManager) }
+                if (match != null) {
+                    cacheManager.updateMangaCache(match)
+                    val details = fetchMangaDetailsBySlug(match.slug)
+                    updateTaggedMangaUrl(match.slug, manga)
+                    return details
+                }
+                return fetchMangaDetailsByScraping(slug, taggedId, manga.title)
+            }
+            val dto = jsonInstance.decodeMangaDetailPayload(body)
+            cacheManager.updateMangaCache(dto)
+            persistChapterCount(dto.id, dto.chapterCount, "mangaDetails")
+            val resolvedId = resolveStableId(dto.slug, dto.name, dto.id?.toString())
+            val details = dto.toSMangaDetails(resolvedId)
+            updateTaggedMangaUrl(dto.slug, manga)
+            details
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchMangaDetails fallback to scraping", e)
+            val taggedId = UrlUtils.mangaIdFromUrl(manga.url)
+            fetchMangaDetailsByScraping(slug, taggedId, manga.title)
+        }
+    }
+
+    private suspend fun fetchChapterListWithFallback(slug: String, manga: SManga): List<SChapter> = try {
+        val base = dashboardBaseUrl()
+        val mangaId = normalizedMangaId(manga.url)
+        fetchChapterListPaginated(slug, mangaId, base, manga)
+    } catch (e: Exception) {
+        Log.w(TAG, "Failed to fetch API chapters for manga ${manga.url}, falling back to HTML", e)
+        val (chapters, parsedTotal) = fetchChapterListFromHtml(manga)
+        val validated = validateChapterList(normalizedMangaId(manga.url), UrlUtils.mangaSlugFromUrl(manga.url), chapters, "html-fallback", parsedTotal, 1)
+        persistChapterCount(parseMangaIdOrNull(normalizedMangaId(manga.url)), parsedTotal, "html-fallback")
+        validated
+    }
+
+    private suspend fun fetchChapterListPaginated(slug: String, mangaId: String, dashboardBase: String, manga: SManga): List<SChapter> {
+        val firstUrl = "$dashboardBase/api/series/$slug/chapters?page=1&direction=desc&type=comic"
+        val firstResp = client.get(firstUrl, ensureSuccess = false)
+        val firstBody = firstResp.body.string()
+        if (firstResp.code == 401) {
+            logHttpIssue("chapterList#401", firstResp.code, firstResp.request.url.toString())
+            return fetchChapterListByScraping(slug, mangaId)
+        }
+        if (apiHelper.isErrorPage(firstResp.code, firstBody)) {
+            logHttpIssue("chapterList#errorPage", firstResp.code, firstResp.request.url.toString())
+            val retry = forceRefreshAndRetryChapterList(mangaId, firstResp.request.url.toString())
+            if (retry != null) return retry
+            val match = mangaId.let { apiHelper.resolveMangaById(it, cacheManager) } ?: manga.title.let { apiHelper.resolveMangaByName(it, mangaId, cacheManager) }
             if (match != null) {
                 cacheManager.updateMangaCache(match)
-                val details = fetchMangaDetailsBySlug(match.slug)
-                updateTaggedMangaUrl(response, match.slug)
-                return details
+                updateTaggedMangaUrl(match.slug, manga)
+                return fetchChapterListBySlug(match.slug, match.id?.toString() ?: mangaId)
             }
-            // Intentar scraping como último recurso
-            val slugFromUrl = mangaSlugFromDetailsRequest(response)
-            return fetchMangaDetailsByScraping(
-                slug = slugFromUrl,
-                preferredMangaId = currentId,
-                preferredTitle = title,
-            )
+            return fetchChapterListByScraping(slug, mangaId)
         }
-
-        val dto = json.decodeMangaDetailPayload(body)
-        cacheManager.updateMangaCache(dto)
-        persistChapterCount(dto.id, dto.chapterCount, "mangaDetailsParse")
-        val resolvedId = resolveStableId(dto.slug, dto.name, dto.id?.toString())
-        val details = dto.toSMangaDetails(resolvedId)
-        updateTaggedMangaUrl(response, dto.slug)
-        return details
-    }
-
-    private fun mangaSlugFromDetailsRequest(response: Response): String = UrlUtils
-        .mangaSlugFromUrl(response.request.url.toString())
-        ?: throw Exception("Unable to parse Olympus manga slug from ${response.request.url}")
-
-    override fun getChapterUrl(chapter: SChapter): String {
-        val (mangaId, chapterIdentifier) = parseChapterIds(chapter.url)
-        val parsedId = parseMangaId(mangaId)
-        val mangaSlug = resolveSlugForMangaId(parsedId)
-        val backendChapterId = resolveChapterId(mangaId, chapterIdentifier, mangaSlug)
-        return "$baseUrl/capitulo/$backendChapterId/comic-$mangaSlug"
-    }
-
-    override fun chapterListRequest(manga: SManga): Request {
-        val mangaId = normalizedMangaId(manga.url)
-        val parsedId = parseMangaId(mangaId)
-        val mangaSlug = resolveSlugForMangaId(parsedId, manga.title)
-
-        return paginatedChapterListRequest(mangaSlug, mangaId, 1)
-            .newBuilder()
-            .tag(MangaRefTag::class.java, MangaRefTag(manga))
-            .tag(MangaTitleTag::class.java, MangaTitleTag(manga.title))
-            .build()
-    }
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable
-        .fromCallable {
-            resolveAndUpdateMangaSlug(manga)
-        }.map {
-            client.newCall(chapterListRequest(manga)).execute().use { response -> chapterListParse(response) }
-        }.onErrorReturn { error ->
-            Log.w(TAG, "Failed to fetch API chapters for manga ${manga.url}, falling back to HTML", error)
-            val (chapters, parsedTotal) = fetchChapterListFromHtml(manga)
-            val validatedChapters = validateChapterList(
-                mangaId = normalizedMangaId(manga.url),
-                slug = UrlUtils.mangaSlugFromUrl(manga.url),
-                chapters = chapters,
-                source = "html-fallback",
-                reportedTotal = parsedTotal,
-                pagesFetched = 1,
-            )
-            persistChapterCount(parseMangaIdOrNull(normalizedMangaId(manga.url)), parsedTotal, "html-fallback")
-            validatedChapters
+        val data = jsonInstance.decodeFromString<PayloadChapterDto>(firstBody)
+        Log.d(TAG, "Chapter page loaded: mangaId=$mangaId slug=$slug page=1 pageCount=${data.data.size} reportedTotal=${data.meta.total}")
+        var resultSize = data.data.size
+        var page = 2
+        while (data.meta.total > resultSize) {
+            val newUrl = "$dashboardBase/api/series/$slug/chapters?page=$page&direction=desc&type=comic"
+            val resp = client.get(newUrl, ensureSuccess = false)
+            val body = resp.body.string()
+            if (apiHelper.isErrorPage(resp.code, body)) throw Exception("Error al obtener página $page de capítulos")
+            val newData = jsonInstance.decodeFromString<PayloadChapterDto>(body)
+            Log.d(TAG, "Chapter page loaded: mangaId=$mangaId slug=$slug page=$page pageCount=${newData.data.size} reportedTotal=${newData.meta.total}")
+            if (newData.data.isEmpty()) throw Exception("Olympus chapter pagination stopped with empty page: mangaId=$mangaId slug=$slug page=$page loaded=$resultSize reportedTotal=${data.meta.total}")
+            data.data += newData.data
+            resultSize += newData.data.size
+            page += 1
         }
-
-    private fun resolveAndUpdateMangaSlug(manga: SManga) {
-        val mangaId = UrlUtils.mangaIdFromUrl(manga.url) ?: return
-        val slug = apiHelper.resolveSlugForManga(manga, cacheManager) ?: UrlUtils.mangaSlugFromUrl(manga.url) ?: return
-        preferences.slugMap = preferences.slugMap + (mangaId.toInt() to slug)
-        manga.url = mangaId
-        cacheManager.updateMangaCache(mangaId, manga.title, slug)
+        synchronized(this) {
+            val cacheUpdates = mutableMapOf<String, Int>()
+            data.data.forEach { dto -> cacheUpdates["$mangaId/${dto.name}"] = dto.id }
+            chapterNameToIdCache = chapterNameToIdCache + cacheUpdates
+        }
+        val chapters = data.data.map { it.toSChapter(slug, mangaId) }
+        persistChapterCount(parseMangaIdOrNull(mangaId), data.meta.total, "chapterList-api")
+        return validateChapterList(mangaId, slug, chapters, "api", data.meta.total, page - 1)
     }
 
-    private fun paginatedChapterListRequest(
-        mangaUrl: String,
-        mangaId: String,
-        page: Int,
-    ): Request = GET(
-        url = "$dashboardApiBaseUrl/api/series/$mangaUrl/chapters?page=$page&direction=desc&type=comic",
-        headers = headers,
-    ).newBuilder()
-        .tag(String::class.java, mangaId)
-        .build()
+    private suspend fun fetchChapterListBySlug(slug: String, mangaId: String): List<SChapter> {
+        val base = dashboardBaseUrl()
+        return fetchChapterListPaginated(
+            slug,
+            mangaId,
+            base,
+            SManga.create().apply {
+                url = mangaId
+                title = cacheManager.getMangaTitleById(mangaId) ?: slug
+            },
+        )
+    }
 
-    private fun fetchChapterListBySlug(
-        slug: String,
-        mangaId: String,
-    ): List<SChapter> = client
-        .newCall(paginatedChapterListRequest(slug, mangaId, 1))
-        .execute()
-        .use { chapterListParse(it) }
-
-    private fun fetchChapterListByScraping(
-        slug: String,
-        preferredMangaId: String?,
-    ): List<SChapter> {
-        val mangaId = preferredMangaId
-            ?: apiHelper.resolveIdBySlug(slug, cacheManager)
-            ?: throw Exception("Unable to resolve Olympus manga ID for $slug")
+    private suspend fun fetchChapterListByScraping(slug: String, preferredMangaId: String?): List<SChapter> {
+        val mangaId = preferredMangaId ?: apiHelper.resolveIdBySlug(slug, cacheManager) ?: throw Exception("Unable to resolve Olympus manga ID for $slug")
         val (chapters, parsedTotal) = fetchChapterListFromHtml(
             SManga.create().apply {
                 title = cacheManager.getMangaTitleById(mangaId) ?: slug
                 url = mangaId
             },
         )
-        val validatedChapters = validateChapterList(
-            mangaId = mangaId,
-            slug = slug,
-            chapters = chapters,
-            source = "html-fallback-internal",
-            reportedTotal = parsedTotal,
-            pagesFetched = 1,
-        )
+        val validated = validateChapterList(mangaId, slug, chapters, "html-fallback-internal", parsedTotal, 1)
         persistChapterCount(parseMangaIdOrNull(mangaId), parsedTotal, "html-fallback-internal")
-        return validatedChapters
+        return validated
     }
 
-    /**
-     * Stale-slug recovery for chapter list API errors (404, 500, HTML error pages).
-     * Force-refreshes the series list cache, resolves the latest slug by stable manga ID,
-     * and retries the chapter API exactly once. Returns null when a retry is not possible.
-     */
-    private fun forceRefreshAndRetryChapterList(
-        taggedMangaId: String?,
-        originalResponse: Response,
-    ): List<SChapter>? {
+    private suspend fun forceRefreshAndRetryChapterList(taggedMangaId: String?, originalUrl: String): List<SChapter>? {
         if (taggedMangaId == null) return null
         Log.d(TAG, "Stale-slug recovery: force-refreshing series list for mangaId=$taggedMangaId")
+        val base = publicBaseUrl()
         try {
-            apiHelper.forceRefreshSeriesList(cacheManager)
+            apiHelper.forceRefreshSeriesList(cacheManager, base)
         } catch (e: Exception) {
             Log.w(TAG, "Stale-slug recovery: force-refresh failed", e)
             return null
         }
-        val match = apiHelper.resolveMangaById(taggedMangaId, cacheManager)
-        if (match == null) {
-            Log.d(TAG, "Stale-slug recovery: mangaId=$taggedMangaId not found after refresh")
-            return null
-        }
+        val match = apiHelper.resolveMangaById(taggedMangaId, cacheManager) ?: return null
         val newSlug = match.slug
-        val oldSlug = originalResponse.request.url.toString()
-            .substringAfter("/series/").substringBefore("/chapters")
+        val oldSlug = originalUrl.substringAfter("/series/").substringBefore("/chapters")
         if (newSlug == oldSlug) {
             Log.d(TAG, "Stale-slug recovery: slug unchanged ($newSlug), skipping retry")
             return null
@@ -804,136 +566,34 @@ abstract class OlympusScanlation :
         return fetchChapterListBySlug(newSlug, mangaId)
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val body = response.body.string()
-        val taggedManga = response.request.tag(MangaRefTag::class.java)?.manga
-        val taggedMangaId = taggedManga?.let { UrlUtils.mangaIdFromUrl(it.url) }
-        // Si la API devuelve 401, intentar scraping fallback
-        if (response.code == 401) {
-            logHttpIssue("chapterListParse#401", response)
-            val slug = response.request.url.toString().substringAfter("/series/").substringBefore("/chapters")
-            return fetchChapterListByScraping(slug, taggedMangaId)
-        }
-        if (apiHelper.isErrorPage(response.code, body)) {
-            logHttpIssue("chapterListParse#errorPage", response)
-            // Stale-slug recovery: force-refresh series list, resolve by stable manga ID, retry once.
-            val retryResult = forceRefreshAndRetryChapterList(taggedMangaId, response)
-            if (retryResult != null) return retryResult
-            // Force-refresh did not yield a usable slug — fall through to original resolution.
-            val title = response.request.tag(MangaTitleTag::class.java)?.title
-            val currentId = taggedMangaId
-            val match =
-                currentId?.let { apiHelper.resolveMangaById(it, cacheManager) }
-                    ?: title?.let { apiHelper.resolveMangaByName(it, currentId, cacheManager) }
-            if (match != null) {
-                cacheManager.updateMangaCache(match)
-                updateTaggedMangaUrl(response, match.slug)
-                return fetchChapterListBySlug(match.slug, match.id?.toString() ?: currentId ?: match.slug)
-            }
-            // Intentar scraping como último recurso
-            val slugFromUrl = response.request.url.toString().substringAfter("/series/").substringBefore("/chapters")
-            return fetchChapterListByScraping(slugFromUrl, currentId)
-        }
-
-        val slug =
-            response.request.url
-                .toString()
-                .substringAfter("/series/")
-                .substringBefore("/chapters")
-        val mangaId = response.request.tag(String::class.java) ?: apiHelper.resolveIdBySlug(slug, cacheManager) ?: slug
-        val data = json.decodeFromString<PayloadChapterDto>(body)
-        Log.d(
-            TAG,
-            "Chapter page loaded: mangaId=$mangaId slug=$slug page=1 pageCount=${data.data.size} reportedTotal=${data.meta.total}",
-        )
-        var resultSize = data.data.size
-        var page = 2
-        while (data.meta.total > resultSize) {
-            val newRequest = paginatedChapterListRequest(slug, mangaId, page)
-            val newResponse = client.newCall(newRequest).execute()
-            val newBody = newResponse.body.string()
-            if (apiHelper.isErrorPage(newResponse.code, newBody)) {
-                throw Exception("Error al obtener página $page de capítulos")
-            }
-            val newData = json.decodeFromString<PayloadChapterDto>(newBody)
-            Log.d(
-                TAG,
-                "Chapter page loaded: mangaId=$mangaId slug=$slug page=$page pageCount=${newData.data.size} reportedTotal=${newData.meta.total}",
-            )
-            if (newData.data.isEmpty()) {
-                throw Exception(
-                    "Olympus chapter pagination stopped with empty page: mangaId=$mangaId slug=$slug " +
-                        "page=$page loaded=$resultSize reportedTotal=${data.meta.total}",
-                )
-            }
-            data.data += newData.data
-            resultSize += newData.data.size
-            page += 1
-        }
-
-        synchronized(this) {
-            val cacheUpdates = mutableMapOf<String, Int>()
-            data.data.forEach { dto ->
-                cacheUpdates["$mangaId/${dto.name}"] = dto.id
-            }
-            chapterNameToIdCache = chapterNameToIdCache + cacheUpdates
-        }
-
-        val chapters = data.data.map { it.toSChapter(slug, dateFormat, mangaId) }
-        persistChapterCount(parseMangaIdOrNull(mangaId), data.meta.total, "chapterListParse-api")
-        return validateChapterList(
-            mangaId = mangaId,
-            slug = slug,
-            chapters = chapters,
-            source = "api",
-            reportedTotal = data.meta.total,
-            pagesFetched = page - 1,
-        )
-    }
-
-    private fun fetchChapterListFromHtml(manga: SManga): Pair<List<SChapter>, Int?> {
+    private suspend fun fetchChapterListFromHtml(manga: SManga): Pair<List<SChapter>, Int?> {
         val mangaId = normalizedMangaId(manga.url)
         val slug = resolveSlugForMangaId(parseMangaId(mangaId), manga.title)
-        val pageUrl = "$baseUrl/series/comic-$slug"
-
-        val document = client.newCall(GET(pageUrl, headers)).execute().asJsoup()
-
-        val parsedTotal = CHAPTER_COUNT_TEXT_REGEX.find(document.text())
-            ?.groupValues?.getOrNull(1)?.toIntOrNull()
-
+        val base = publicBaseUrl()
+        val pageUrl = "$base/series/comic-$slug"
+        val document = client.get(pageUrl, ensureSuccess = false).asJsoup()
+        val parsedTotal = CHAPTER_COUNT_TEXT_REGEX.find(document.text())?.groupValues?.getOrNull(1)?.toIntOrNull()
         val chapters = document.select("a[href*=/capitulo/]").mapNotNull { element ->
             val href = element.attr("href")
-            val chapterId = href.substringAfter("/capitulo/").substringBefore("/")
-                .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-
+            val chapterId = href.substringAfter("/capitulo/").substringBefore("/").takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val chapterNameEl = element.selectFirst(".chapter-name")
             val chapterNameText = chapterNameEl?.text()?.trim()
-            // Extract chapter number from the displayed name, never from the backend internal ID.
-            // "Capitulo 1" → 1, "Capitulo 145.5" → 145.5, "1" → 1
-            val chapterNumber = chapterNameText?.let { text ->
-                CHAPTER_NUMBER_TEXT_REGEX.find(text)?.groupValues?.getOrNull(1)
-                    ?: text.toFloatOrNull()?.toString()
-            } ?: "-1"
-
+            val chapterNumber = chapterNameText?.let { text -> CHAPTER_NUMBER_TEXT_REGEX.find(text)?.groupValues?.getOrNull(1) ?: text.toFloatOrNull()?.toString() } ?: "-1"
             val timeEl = element.selectFirst("time[datetime]")
             val dateStr = timeEl?.attr("datetime") ?: ""
-
             val backendId = chapterId.toIntOrNull()
-
             SChapter.create().apply {
                 name = "Capitulo $chapterNumber"
                 url = "$mangaId/$chapterNumber"
                 chapter_number = chapterNumber.toFloatOrNull() ?: -1f
                 date_upload = try {
-                    dateFormat.parse(dateStr)?.time ?: 0L
+                    kotlin.time.Instant.parseOrNull(dateStr)?.toEpochMilliseconds() ?: 0L
                 } catch (_: Exception) {
                     0L
                 }
             }.also {
                 if (backendId != null) {
-                    synchronized(this) {
-                        chapterNameToIdCache = chapterNameToIdCache + mapOf("$mangaId/$chapterNumber" to backendId)
-                    }
+                    synchronized(this) { chapterNameToIdCache = chapterNameToIdCache + mapOf("$mangaId/$chapterNumber" to backendId) }
                 }
             }
         }
@@ -941,11 +601,7 @@ abstract class OlympusScanlation :
         return Pair(chapters, parsedTotal)
     }
 
-    private fun persistChapterCount(
-        mangaId: Int?,
-        chapterCount: Int?,
-        source: String,
-    ) {
+    private fun persistChapterCount(mangaId: Int?, chapterCount: Int?, source: String) {
         if (mangaId == null || chapterCount == null || chapterCount <= 0) return
         val existing = preferences.chapterCountMap[mangaId]
         if (existing == null || chapterCount > existing) {
@@ -954,147 +610,85 @@ abstract class OlympusScanlation :
         }
     }
 
-    private fun validateChapterList(
-        mangaId: String,
-        slug: String?,
-        chapters: List<SChapter>,
-        source: String,
-        reportedTotal: Int?,
-        pagesFetched: Int,
-    ): List<SChapter> {
+    private fun validateChapterList(mangaId: String, slug: String?, chapters: List<SChapter>, source: String, reportedTotal: Int?, pagesFetched: Int): List<SChapter> {
         val parsedMangaId = parseMangaIdOrNull(mangaId)
         if (parsedMangaId == null) {
-            Log.d(
-                TAG,
-                "Chapter list accepted without count guard: mangaId=$mangaId slug=$slug " +
-                    "source=$source current=${chapters.size} reportedTotal=$reportedTotal pagesFetched=$pagesFetched",
-            )
+            Log.d(TAG, "Chapter list accepted without count guard: mangaId=$mangaId slug=$slug source=$source current=${chapters.size} reportedTotal=$reportedTotal pagesFetched=$pagesFetched")
             return chapters
         }
-
         val previousCount = preferences.chapterCountMap[parsedMangaId]
         val maxChapterNumber = chapters.maxOfOrNull { it.chapter_number }
         val maxChapterFloor = maxChapterNumber?.toInt()?.takeIf { it > 0 }
-
-        // Best expected count from all available sources: API reported total, persisted count,
-        // and maximum chapter number seen in the list (as a floor).
         val bestExpectedCount = listOfNotNull(reportedTotal, previousCount, maxChapterFloor).maxOrNull()
-
-        Log.d(
-            TAG,
-            "Chapter list summary: mangaId=$parsedMangaId slug=$slug source=$source " +
-                "current=${chapters.size} previous=$previousCount reportedTotal=$reportedTotal " +
-                "bestExpected=$bestExpectedCount pagesFetched=$pagesFetched maxChapterNumber=$maxChapterNumber maxChapterFloor=$maxChapterFloor",
-        )
-
-        // Guard: reject significantly incomplete lists when we have a reliable expected count.
-        // Skip guard when bestExpectedCount is null (unknown) or <= 1 (one-shots / new series).
+        Log.d(TAG, "Chapter list summary: mangaId=$parsedMangaId slug=$slug source=$source current=${chapters.size} previous=$previousCount reportedTotal=$reportedTotal bestExpected=$bestExpectedCount pagesFetched=$pagesFetched maxChapterNumber=$maxChapterNumber maxChapterFloor=$maxChapterFloor")
         if (bestExpectedCount != null && bestExpectedCount > 1) {
             val minimumAccepted = bestExpectedCount * MIN_ACCEPTED_CHAPTER_PERCENT / 100
             if (minimumAccepted > 1 && chapters.size < minimumAccepted) {
-                throw Exception(
-                    "Olympus chapter list looks incomplete: mangaId=$parsedMangaId slug=$slug " +
-                        "source=$source bestExpected=$bestExpectedCount current=${chapters.size} " +
-                        "minimumAccepted=$minimumAccepted reportedTotal=$reportedTotal previous=$previousCount " +
-                        "pagesFetched=$pagesFetched maxChapterNumber=$maxChapterNumber",
-                )
+                throw Exception("Olympus chapter list looks incomplete: mangaId=$parsedMangaId slug=$slug source=$source bestExpected=$bestExpectedCount current=${chapters.size} minimumAccepted=$minimumAccepted reportedTotal=$reportedTotal previous=$previousCount pagesFetched=$pagesFetched maxChapterNumber=$maxChapterNumber")
             }
         }
-
         if (chapters.isNotEmpty()) {
             persistChapterCount(parsedMangaId, chapters.size, source)
             Log.d(TAG, "Stored good chapter count: mangaId=$parsedMangaId count=${chapters.size} source=$source")
         }
-
         return chapters
     }
 
-    private fun resolveChapterId(mangaId: String, chapterIdentifier: String, mangaSlug: String): String {
-        val normalizedChapterIdentifier = chapterIdentifier.normalizeChapterIdentifier()
-        val cacheKey = "$mangaId/$normalizedChapterIdentifier"
-
+    private suspend fun resolveChapterId(mangaId: String, chapterIdentifier: String, mangaSlug: String): String {
+        val normalized = chapterIdentifier.normalizeChapterIdentifier()
+        val cacheKey = "$mangaId/$normalized"
         chapterNameToIdCache[cacheKey]?.let { return it.toString() }
-
         val parsedMangaId = parseMangaId(mangaId)
         try {
-            val page1Request = paginatedChapterListRequest(mangaSlug, mangaId, 1)
-            val firstResponse = client.newCall(page1Request).execute()
-            val firstPage = firstResponse.parseAs<PayloadChapterDto>()
+            val base = dashboardBaseUrl()
+            val first = client.get("$base/api/series/$mangaSlug/chapters?page=1&direction=desc&type=comic", ensureSuccess = false).parseAs<PayloadChapterDto>()
             val allChapters = mutableListOf<ChapterDto>()
-            allChapters += firstPage.data
-
-            var resultSize = firstPage.data.size
+            allChapters += first.data
+            var resultSize = first.data.size
             var page = 2
-            while (firstPage.meta.total > resultSize) {
-                val newRequest = paginatedChapterListRequest(mangaSlug, mangaId, page)
-                val newResponse = client.newCall(newRequest).execute()
-                val newData = newResponse.parseAs<PayloadChapterDto>()
+            while (first.meta.total > resultSize) {
+                val newData = client.get("$base/api/series/$mangaSlug/chapters?page=$page&direction=desc&type=comic", ensureSuccess = false).parseAs<PayloadChapterDto>()
                 allChapters += newData.data
                 resultSize += newData.data.size
                 page += 1
             }
-
             synchronized(this) {
                 val cacheUpdates = mutableMapOf<String, Int>()
-                allChapters.forEach { dto ->
-                    cacheUpdates["$mangaId/${dto.name}"] = dto.id
-                }
+                allChapters.forEach { dto -> cacheUpdates["$mangaId/${dto.name}"] = dto.id }
                 chapterNameToIdCache = chapterNameToIdCache + cacheUpdates
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to resolve chapter ID via chapter list for manga $parsedMangaId", e)
         }
-
         chapterNameToIdCache[cacheKey]?.let { return it.toString() }
-
-        normalizedChapterIdentifier.toIntOrNull()?.let { return normalizedChapterIdentifier }
-
+        normalized.toIntOrNull()?.let { return normalized }
         throw Exception("Unable to resolve chapter ID for $chapterIdentifier in manga $mangaId")
     }
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val (mangaId, chapterIdentifier) = parseChapterIds(chapter.url)
         val parsedId = parseMangaId(mangaId)
-        val mangaSlug = resolveSlugForMangaId(parsedId)
+        val mangaSlug = try {
+            resolveSlugForMangaId(parsedId)
+        } catch (_: Exception) {
+            UrlUtils.chapterSlugFromUrl(chapter.url).takeIf { it.isNotBlank() } ?: throw Exception("Unable to resolve slug")
+        }
         val backendChapterId = resolveChapterId(mangaId, chapterIdentifier, mangaSlug)
-
-        return GET("$baseUrl/api/capitulo/comic-$mangaSlug/$backendChapterId", headers)
-    }
-
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
-        val slugFromUrl = UrlUtils.chapterSlugFromUrl(chapter.url)
-        val mangaId = UrlUtils.chapterMangaIdFromUrl(chapter.url) ?: cacheManager.getMangaIdBySlug(slugFromUrl)
-        val resolvedSlug =
-            if (mangaId != null) {
-                apiHelper.resolveSlugById(mangaId, cacheManager.getMangaTitleById(mangaId), cacheManager) ?: slugFromUrl
-            } else {
-                slugFromUrl
-            }
-        if (resolvedSlug != slugFromUrl && resolvedSlug.isNotBlank()) {
-            chapter.url = chapter.url.replace(Regex("comic-[^/?]+"), "comic-$resolvedSlug")
-            if (mangaId != null) {
-                cacheManager.updateMangaCache(mangaId, cacheManager.getMangaTitleById(mangaId), resolvedSlug)
-            }
-        }
-    }.map {
-        client.newCall(pageListRequest(chapter)).execute().use { response -> pageListParse(response) }
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
+        val base = publicBaseUrl()
+        val apiUrl = "$base/api/capitulo/comic-$mangaSlug/$backendChapterId"
+        val response = client.get(apiUrl, ensureSuccess = false)
         val body = response.body.string()
-        // Si la API devuelve 401 (Unauthorized), hacer scraping del HTML
         if (response.code == 401 || apiHelper.isErrorPage(response.code, body)) {
-            logHttpIssue("pageListParse", response)
-            // Intentar scraping del capítulo via HTML
-            val chapterId = getChapterIdFromUrl(response.request.url.toString())
-            val mangaSlug = getMangaSlugFromUrl(response.request.url.toString())
-            if (chapterId != null && mangaSlug != null) {
-                return fetchChapterPagesByScraping(mangaSlug, chapterId)
-            }
-            throw Exception("Error al cargar páginas del capítulo: API retornó 401")
+            logHttpIssue("pageList", response.code, response.request.url.toString())
+            val chapterId = getChapterIdFromUrl(response.request.url.toString()) ?: backendChapterId
+            val slug = getMangaSlugFromUrl(response.request.url.toString()) ?: mangaSlug
+            return fetchChapterPagesByScraping(slug, chapterId)
         }
-        return json.decodeFromString<PayloadPagesDto>(body).chapter.pages.mapIndexed { i, img ->
-            Page(i, imageUrl = img)
+        return try {
+            jsonInstance.decodeFromString<PayloadPagesDto>(body).chapter.pages.mapIndexed { i, img -> Page(i, imageUrl = img) }
+        } catch (e: Exception) {
+            logHttpIssue("pageList#parse", response.code, response.request.url.toString())
+            fetchChapterPagesByScraping(mangaSlug, backendChapterId)
         }
     }
 
@@ -1106,69 +700,131 @@ abstract class OlympusScanlation :
     }?.takeIf { it.isNotBlank() }
 
     private fun getMangaSlugFromUrl(url: String): String? {
-        if ("/api/capitulo/comic-" in url) {
-            return url.substringAfter("/api/capitulo/comic-").substringBefore("/").substringBefore("?")
-        }
-        if ("/capitulo/" in url && "/comic-" in url) {
-            return url.substringAfter("/comic-").substringBefore("/").substringBefore("?")
-        }
+        if ("/api/capitulo/comic-" in url) return url.substringAfter("/api/capitulo/comic-").substringBefore("/").substringBefore("?")
+        if ("/capitulo/" in url && "/comic-" in url) return url.substringAfter("/comic-").substringBefore("/").substringBefore("?")
         val match = Regex("/series/([^/]+)/chapters").find(url)
         return match?.groupValues?.getOrNull(1)
     }
 
-    private fun fetchChapterPagesByScraping(mangaSlug: String, chapterId: String): List<Page> {
-        val chapterUrl = "$baseUrl/capitulo/$chapterId/comic-$mangaSlug"
-        val document = client.newCall(GET(chapterUrl, headers)).execute().asJsoup()
-
-        // Nuevo layout: múltiples contenedores con <img src="...storage/comics/..."> dentro de section principal.
-        val imgElements =
-            document.select(
-                "section img[src], div.flex.flex-col img[src], div.relative img[src], img[src*=/storage/comics/]",
-            )
-
+    private suspend fun fetchChapterPagesByScraping(mangaSlug: String, chapterId: String): List<Page> {
+        val base = publicBaseUrl()
+        val chapterUrl = "$base/capitulo/$chapterId/comic-$mangaSlug"
+        val document = client.get(chapterUrl, ensureSuccess = false).asJsoup()
+        val imgElements = document.select("section img[src], div.flex.flex-col img[src], div.relative img[src], img[src*=/storage/comics/]")
         val uniqueImageUrls = linkedSetOf<String>()
         imgElements.forEach { img ->
             val src = img.attr("abs:src").trim()
-            if (src.isNotBlank() && src.contains("/storage/comics/", ignoreCase = true)) {
-                uniqueImageUrls.add(src)
-            }
+            if (src.isNotBlank() && src.contains("/storage/comics/", ignoreCase = true)) uniqueImageUrls.add(src)
         }
-
         val images = uniqueImageUrls.mapIndexed { i, src -> Page(i, imageUrl = src) }
-        if (images.isEmpty()) {
-            throw Exception("No se pudieron extraer las páginas del capítulo")
-        }
+        if (images.isEmpty()) throw Exception("No se pudieron extraer las páginas del capítulo")
         return images
     }
 
-    private fun logHttpIssue(
-        stage: String,
-        response: Response,
-    ) {
-        val requestUrl = response.request.url.toString()
-        val host = response.request.url.host
-        val code = response.code
-        Log.w("OlympusScanlation", "HTTP issue stage=$stage code=$code host=$host url=$requestUrl")
+    private fun logHttpIssue(stage: String, code: Int, url: String) {
+        val host = try {
+            url.toHttpUrl().host
+        } catch (_: Exception) {
+            "unknown"
+        }
+        Log.w("OlympusScanlation", "HTTP issue stage=$stage code=$code host=$host url=$url")
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    private suspend fun fetchPopularMangaByScraping(): MangasPage {
+        val base = publicBaseUrl()
+        val document = client.get(base, ensureSuccess = false).asJsoup()
+        val section = document.selectFirst("section:has(h2:matchesOwn((?i)Popular Del Dia))") ?: document.selectFirst("section:has(h2:matchesOwn((?i)Popular))") ?: throw Exception("No se encontró la sección de populares en la web")
+        val mangaList = section.select("figure a[href^=/series/comic-], a[href^=/series/comic-]").mapNotNull { link ->
+            val href = link.attr("href").trim()
+            if (href.isBlank()) return@mapNotNull null
+            val title = link.selectFirst("figcaption")?.text()?.trim() ?: link.attr("title").trim().ifBlank { link.attr("aria-label").trim() }.ifBlank { link.selectFirst("img[alt]")?.attr("alt")?.trim().orEmpty() }
+            if (title.isBlank()) return@mapNotNull null
+            val imageElement = link.selectFirst("img[src]") ?: link.closest("figure")?.selectFirst("img[src]") ?: link.parent()?.selectFirst("img[src]")
+            val thumbnail = imageElement?.attr("abs:src")?.trim().orEmpty()
+            val trackedUrl = buildTrackedMangaUrlForFallback(href, title)
+            SManga.create().apply {
+                this.title = title
+                this.url = trackedUrl
+                this.thumbnail_url = thumbnail.ifBlank { null }
+            }
+        }.distinctBy { it.url }
+        if (mangaList.isEmpty()) throw Exception("No se pudieron obtener populares via fallback HTML")
+        return MangasPage(mangaList, hasNextPage = false)
+    }
 
-    override fun getFilterList(): FilterList = filterManager.getFilterList(headersMap, dashboardApiBaseUrl)
+    private suspend fun fetchLatestUpdatesByScraping(page: Int): MangasPage {
+        val base = publicBaseUrl()
+        val updatesUrl = "$base/capitulos".toHttpUrl().newBuilder().apply { if (page > 1) addQueryParameter("page", page.toString()) }.build()
+        val document = client.get(updatesUrl, ensureSuccess = false).asJsoup()
+        val primaryLinks = document.select("div.grid.md\\:grid-cols-2.gap-4 div.bg-gray-800 a[href^=/series/comic-]")
+        val links = if (primaryLinks.isNotEmpty()) primaryLinks else document.select("div.grid a[href^=/series/comic-], a[href^=/series/comic-]")
+        val mangaList = links.mapNotNull { link ->
+            val href = link.attr("href").trim()
+            if (href.isBlank()) return@mapNotNull null
+            val title = link.selectFirst("figcaption")?.text()?.trim() ?: link.attr("title").trim().ifBlank { link.attr("aria-label").trim() }.ifBlank { link.closest(".bg-gray-800")?.selectFirst("figcaption")?.text()?.trim().orEmpty() }
+            if (title.isBlank()) return@mapNotNull null
+            val imageElement = link.selectFirst("img[src]") ?: link.closest(".bg-gray-800")?.selectFirst("img[src]")
+            val thumbnail = imageElement?.attr("abs:src")?.trim().orEmpty()
+            val trackedUrl = buildTrackedMangaUrlForFallback(href, title)
+            SManga.create().apply {
+                this.title = title
+                this.url = trackedUrl
+                this.thumbnail_url = thumbnail.ifBlank { null }
+            }
+        }.distinctBy { it.url }
+        if (mangaList.isEmpty()) throw Exception("No se pudieron obtener recientes via fallback HTML")
+        val maxPageFromLinks = document.select("a[href^=/capitulos?page=]").mapNotNull { anchor -> anchor.attr("href").substringAfter("page=", "").substringBefore("&").toIntOrNull() }.maxOrNull()
+        val nextPageFromArrow = document.selectFirst("a[title*=siguiente], a[name*=siguiente], a:has(i.i-heroicons-arrow-right-20-solid)")?.attr("href")?.substringAfter("page=", "")?.substringBefore("&")?.toIntOrNull()
+        val hasNextPage = when {
+            nextPageFromArrow != null -> nextPageFromArrow > page
+            maxPageFromLinks != null -> page < maxPageFromLinks
+            else -> mangaList.size >= 10
+        }
+        return MangasPage(mangaList, hasNextPage = hasNextPage)
+    }
+
+    private suspend fun buildTrackedMangaUrlForFallback(href: String, title: String): String {
+        val slug = href.substringAfter("/series/comic-").substringBefore("?").substringBefore("/")
+        val match = runCatching { fetchMangaDtoBySlug(slug) }.getOrNull() ?: runCatching { apiHelper.resolveMangaByName(title, null, cacheManager) }.getOrNull()
+        val id = match?.id
+        if (slug.isNotBlank() && id != null) {
+            preferences.slugMap = preferences.slugMap + (id to slug)
+            cacheManager.updateMangaCache(id.toString(), title, slug)
+        }
+        return id?.toString() ?: "/series/comic-$slug"
+    }
+
+    override suspend fun fetchFilterData(): JsonElement {
+        val base = dashboardBaseUrl()
+        val response = client.get("$base/api/genres-statuses", ensureSuccess = false)
+        val body = response.body.string()
+        if (!response.isSuccessful || apiHelper.isErrorPage(response.code, body)) throw Exception("Failed to fetch filters")
+        return jsonInstance.parseToJsonElement(body)
+    }
+
+    override fun getFilterList(data: JsonElement?): FilterList = filterManager.getFilterList(data)
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        filterManager.setupPreferenceScreen(screen, defaultBaseUrl)
+        CheckBoxPreference(screen.context).apply {
+            key = FETCH_DOMAIN_PREF
+            title = FETCH_DOMAIN_PREF_TITLE
+            summary = FETCH_DOMAIN_PREF_SUMMARY
+            setDefaultValue(FETCH_DOMAIN_PREF_DEFAULT)
+        }.also(screen::addPreference)
+        // Base URL EditText is provided by generated CustomUrlPreferences (source { baseUrl { custom(...) } })
     }
 
-    private var cachedBaseUrl: String? = null
-    private fun getPrefBaseUrl(): String {
-        if (cachedBaseUrl == null) {
-            cachedBaseUrl = preferences.getString("overrideBaseUrl", defaultBaseUrl)!!
-        }
-        return cachedBaseUrl!!
-    }
-
-    private fun setPrefBaseUrl(value: String) {
-        cachedBaseUrl = value
-        preferences.edit().putString("overrideBaseUrl", value).apply()
+    companion object {
+        private const val FETCH_DOMAIN_PREF = "fetchDomain"
+        private const val FETCH_DOMAIN_PREF_DEFAULT = true
+        private const val FETCH_DOMAIN_PREF_TITLE = "Buscar dominio automáticamente"
+        private const val FETCH_DOMAIN_PREF_SUMMARY = "Intenta buscar el dominio automáticamente al abrir la fuente."
+        private const val SLUG_MAP = "slugMap"
+        private const val CHAPTER_COUNT_MAP = "chapterCountMap"
+        private const val MIN_ACCEPTED_CHAPTER_PERCENT = 70
+        private const val TAG = "OlympusScanlation"
+        private const val CACHE_DURATION_MS = 60 * 60 * 1000L
+        private val CHAPTER_COUNT_TEXT_REGEX = Regex("(\\d+)\\s+cap[ií]tulos?\\s+en\\s+total", RegexOption.IGNORE_CASE)
+        private val CHAPTER_NUMBER_TEXT_REGEX = Regex("cap[ií]tulo\\s*(\\d+(?:\\.\\d+)?)", RegexOption.IGNORE_CASE)
     }
 }

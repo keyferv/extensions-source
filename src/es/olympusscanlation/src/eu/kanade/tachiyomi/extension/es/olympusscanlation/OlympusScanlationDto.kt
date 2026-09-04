@@ -2,10 +2,10 @@ package eu.kanade.tachiyomi.extension.es.olympusscanlation
 
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -14,8 +14,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonTransformingSerializer
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
-import java.text.ParseException
-import java.text.SimpleDateFormat
+import kotlin.time.Instant
 
 @Serializable
 class PayloadHomeDto(
@@ -44,7 +43,7 @@ class PayloadSeriesDto(
 
 @Serializable
 class PayloadSeriesDataDto(
-    val series: SeriesDto? = null, // Can be object sometimes
+    val series: SeriesDto? = null,
     val current_page: Int? = null,
     @Serializable(with = FlexibleMangaListNullableSerializer::class)
     val data: List<MangaDto>? = null,
@@ -152,30 +151,26 @@ class MangaDetailDto(
 )
 
 object FlexibleMangaDataSerializer : JsonTransformingSerializer<MangaDto>(MangaDto.serializer()) {
-    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is kotlinx.serialization.json.JsonArray) {
-        // Si data es un array, tomar el primer elemento
+    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is JsonArray) {
         element.firstOrNull() ?: throw kotlinx.serialization.SerializationException("Empty array in data field")
     } else {
-        // Si data es un objeto, usarlo directamente
         element
     }
 }
 
 object FlexibleMangaListSerializer : JsonTransformingSerializer<List<MangaDto>>(ListSerializer(MangaDto.serializer())) {
-    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is kotlinx.serialization.json.JsonObject) {
-        // Si data es un objeto, envolverlo en un array
-        kotlinx.serialization.json.JsonArray(listOf(element))
+    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is JsonObject) {
+        JsonArray(listOf(element))
     } else {
-        // Si data ya es un array, usarlo directamente
         element
     }
 }
 
 object FlexibleMangaListNullableSerializer : JsonTransformingSerializer<List<MangaDto>>(ListSerializer(MangaDto.serializer())) {
-    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is kotlinx.serialization.json.JsonObject) {
-        kotlinx.serialization.json.JsonArray(listOf(element))
+    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is JsonObject) {
+        JsonArray(listOf(element))
     } else if (element is kotlinx.serialization.json.JsonNull) {
-        kotlinx.serialization.json.JsonArray(emptyList())
+        JsonArray(emptyList())
     } else {
         element
     }
@@ -187,7 +182,6 @@ fun Json.decodeMangaListPayload(body: String): List<MangaDto> {
     return when (data) {
         is JsonArray -> decodeFromJsonElement(ListSerializer(MangaDto.serializer()), data)
         is JsonObject -> {
-            // La API /api/series devuelve: {"data": {"series": {"data": [...]}}, "recommended_series": "..."}
             if (data.containsKey("series")) {
                 val payload = decodeFromJsonElement<PayloadSeriesDto>(root)
                 val seriesData = payload.data.series ?: SeriesDto(
@@ -230,7 +224,6 @@ class ChapterDto(
 ) {
     fun toSChapter(
         mangaSlug: String,
-        dateFormat: SimpleDateFormat,
         mangaId: String? = null,
     ) = SChapter.create().apply {
         name = "Capitulo ${this@ChapterDto.name}"
@@ -241,12 +234,7 @@ class ChapterDto(
             } else {
                 "/capitulo/$id/comic-$mangaSlug"
             }
-        date_upload =
-            try {
-                dateFormat.parse(date)!!.time
-            } catch (e: ParseException) {
-                0L
-            }
+        date_upload = Instant.tryParse(date)
     }
 }
 

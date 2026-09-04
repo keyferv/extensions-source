@@ -2,20 +2,17 @@ package eu.kanade.tachiyomi.extension.es.olympusscanlation
 
 import android.util.Log
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.network.get
+import keiyoushi.utils.jsonInstance
 import kotlinx.serialization.json.Json
+import okhttp3.Headers
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import uy.kohesive.injekt.injectLazy
 
 class ApiHelper(
     private val client: OkHttpClient,
-    private val headers: Map<String, String>,
-    private val apiBaseUrl: String,
+    private val headers: Headers,
 ) {
-    private val json: Json by injectLazy()
-    private val websiteBaseUrl = apiBaseUrl
-        .replace("https://dashboard.", "https://")
-        .replace("https://panel.", "https://")
+    private val json: Json get() = jsonInstance
 
     fun resolveMangaByName(
         title: String,
@@ -26,68 +23,43 @@ class ApiHelper(
         if (query.length < 3) return null
 
         Log.d("OlympusScanlation", "Resolviendo manga por lista local/cacheada para '$query'")
-        ensureSeriesListLoaded(cacheManager)
+        val series = cacheManager.getCachedSeriesList() ?: return null
         val normalized = query.lowercase()
-        val series = cacheManager.getCachedSeriesList()
-        return currentId?.let { id -> series?.firstOrNull { it.id?.toString() == id } }
-            ?: series?.firstOrNull { it.name.lowercase() == normalized }
-            ?: cacheManager.getCachedSeriesList()
-                ?.firstOrNull { it.name.lowercase().contains(normalized) }
-            ?: cacheManager.getCachedSeriesList()
-                ?.firstOrNull { normalized.contains(it.name.lowercase()) }
+        return currentId?.let { id -> series.firstOrNull { it.id?.toString() == id } }
+            ?: series.firstOrNull { it.name.lowercase() == normalized }
+            ?: series.firstOrNull { it.name.lowercase().contains(normalized) }
+            ?: series.firstOrNull { normalized.contains(it.name.lowercase()) }
     }
 
     fun resolveMangaById(
         id: String,
         cacheManager: MangaCacheManager,
-    ): MangaDto? {
-        ensureSeriesListLoaded(cacheManager)
-        return cacheManager.getCachedSeriesList()?.firstOrNull { it.id?.toString() == id }
-    }
+    ): MangaDto? = cacheManager.getCachedSeriesList()?.firstOrNull { it.id?.toString() == id }
 
     fun resolveMangaBySlug(
         slug: String,
         cacheManager: MangaCacheManager,
     ): MangaDto? {
-        ensureSeriesListLoaded(cacheManager)
         val cleanSlug = slug.trim().removeSuffix("/")
         return cacheManager.getCachedSeriesList()?.firstOrNull { it.slug.trim().removeSuffix("/") == cleanSlug }
     }
 
-    /**
-     * Fuerza la recarga de la lista completa de series desde la API.
-     * Se usa cuando un slug devuelve 404/500 y se necesita el slug actualizado.
-     */
-    fun forceRefreshSeriesList(cacheManager: MangaCacheManager) {
+    suspend fun forceRefreshSeriesList(cacheManager: MangaCacheManager, websiteBaseUrl: String) {
         synchronized(this) {
-            cacheManager.clearCachedSeriesList() // invalidar caché
-            loadSeriesList(cacheManager)
+            cacheManager.clearCachedSeriesList()
         }
+        loadSeriesList(cacheManager, websiteBaseUrl)
     }
 
-    private fun ensureSeriesListLoaded(cacheManager: MangaCacheManager) {
-        synchronized(this) {
-            if (cacheManager.getCachedSeriesList() != null) return
-            loadSeriesList(cacheManager)
-        }
+    suspend fun ensureSeriesListLoaded(cacheManager: MangaCacheManager, websiteBaseUrl: String) {
+        if (cacheManager.getCachedSeriesList() != null) return
+        loadSeriesList(cacheManager, websiteBaseUrl)
     }
 
-    private fun loadSeriesList(cacheManager: MangaCacheManager) {
+    private suspend fun loadSeriesList(cacheManager: MangaCacheManager, websiteBaseUrl: String) {
         val apiUrl = "$websiteBaseUrl/api/series/list"
         try {
-            val response =
-                client
-                    .newCall(
-                        Request
-                            .Builder()
-                            .url(apiUrl)
-                            .headers(
-                                okhttp3.Headers
-                                    .Builder()
-                                    .apply { headers.forEach { (k, v) -> add(k, v) } }
-                                    .build(),
-                            ).build(),
-                    ).execute()
+            val response = client.get(apiUrl, headers, ensureSuccess = false)
             val body = response.body.string()
             if (response.code != 401 && !isErrorPage(response.code, body)) {
                 val series = json.decodeMangaListPayload(body)
@@ -113,7 +85,6 @@ class ApiHelper(
     ): String? {
         val cached = cacheManager.getCachedSlugForId(id)
         if (!cached.isNullOrBlank()) {
-            ensureSeriesListLoaded(cacheManager)
             val match = cacheManager.getCachedSeriesList()?.firstOrNull { it.id?.toString() == id }
             if (match != null && match.slug != cached) {
                 cacheManager.updateMangaCache(match)
@@ -143,7 +114,6 @@ class ApiHelper(
 
         val cachedSlug = id?.let { cacheManager.getCachedSlugForId(it) }
         if (!cachedSlug.isNullOrBlank()) {
-            ensureSeriesListLoaded(cacheManager)
             val match = cacheManager.getCachedSeriesList()?.firstOrNull { it.id?.toString() == id }
             if (match != null && match.slug != cachedSlug) {
                 cacheManager.updateMangaCache(match)
