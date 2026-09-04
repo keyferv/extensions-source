@@ -7,12 +7,14 @@ plugins {
 keiyoushi {
     name = "Mantraz Scan"
     versionCode = 61
-    contentWarning = ContentWarning.NSFW // or MIXED, please confirm
+    contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
     source {
         lang = "es"
-        baseUrl = "https://mantrazscan.co"
+        baseUrl {
+            custom("https://mantrazscan.co")
+        }
         id = 7172992930543738693L
     }
 }

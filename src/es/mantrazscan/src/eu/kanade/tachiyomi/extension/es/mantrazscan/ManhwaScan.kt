@@ -1,45 +1,30 @@
 package eu.kanade.tachiyomi.extension.es.mantrazscan
 
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.EditTextPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.getPreferences
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 
 @Source
-abstract class ManhwaScan :
-    HttpSource(),
-    ConfigurableSource {
+abstract class ManhwaScan : KeiSource() {
 
-    override val baseUrl: String
-        get() = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
-
-    private val defaultBaseUrl = "https://mantrazscan.co"
-
-    private val preferences: SharedPreferences = getPreferences()
-
-    override val supportsLatest = true
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor { chain ->
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        addInterceptor { chain ->
             val request = chain.request()
             val baseHost = baseUrl.toHttpUrl().host
             val isPageImage = (request.url.host == baseHost || request.url.host.endsWith(".$baseHost")) &&
@@ -65,136 +50,127 @@ abstract class ManhwaScan :
                 .body(bytes.toResponseBody(mediaType))
                 .build()
         }
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-
-    override fun popularMangaRequest(page: Int): Request = GET(if (page == 1) baseUrl else exploreUrl(page), headers)
-
-    override fun popularMangaParse(response: Response): MangasPage = if (isHomePage(response)) {
-        parseTrendingPage(response)
-    } else {
-        parseSeriesGrid(response)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET(if (page == 1) baseUrl else exploreUrl(page), headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = if (isHomePage(response)) {
-        parseSeriesGrid(response, forceHasNextPage = true)
-    } else {
-        parseSeriesGrid(response)
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val url = if (page == 1) baseUrl else exploreUrl(page)
+        val document = client.get(url).asJsoup()
+        return if (page == 1) {
+            // Homepage renders trending slider; preserve exact local behavior
+            parseTrendingPage(document)
+        } else {
+            parseSeriesGrid(document)
+        }
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val url = if (page == 1) baseUrl else exploreUrl(page)
+        val document = client.get(url).asJsoup()
+        return if (page == 1) {
+            parseSeriesGrid(document, forceHasNextPage = true)
+        } else {
+            parseSeriesGrid(document)
+        }
+    }
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val genre = filters.firstInstanceOrNull<GenreFilter>()?.toUriPart().orEmpty()
         val basePath = if (page > 1) "$baseUrl/explorar/page/$page/" else "$baseUrl/explorar/"
         val url = basePath.toHttpUrl().newBuilder().apply {
             if (query.isNotBlank()) addQueryParameter("q", query.trim())
             if (genre.isNotEmpty()) addQueryParameter("genero", genre)
         }.build()
-        return GET(url, headers)
+        val document = client.get(url).asJsoup()
+        return parseSeriesGrid(document)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = parseSeriesGrid(response)
-
-    private fun parseSeriesGrid(response: Response, forceHasNextPage: Boolean = false): MangasPage {
-        val document = response.asJsoup()
-        val mangas = document.selectFirst("main .series-grid")
-            ?.select(".s-card")
-            ?.mapNotNull { card ->
-                val link = card.selectFirst("a.s-card-title[href]") ?: return@mapNotNull null
-
-                SManga.create().apply {
-                    title = link.text().trim()
-                    url = link.attr("href")
-                        .substringAfter(baseUrl)
-                        .ensureStartsWithSlash()
-                    thumbnail_url = card.selectFirst(".s-card-img img[src]")?.attr("abs:src")
-                }
-            }
-            .orEmpty()
-
-        val hasNextPage = forceHasNextPage || document.selectFirst(".pager-btn[href]:matchesOwn(Siguiente)") != null
-        return MangasPage(mangas, hasNextPage)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val baseHost = baseUrl.toHttpUrl().host
+        if (url.host != baseHost && !url.host.endsWith(".$baseHost")) return null
+        val path = url.encodedPath
+        if (path == "/" || path == "/explorar" || path.startsWith("/explorar/")) return null
+        // Normalize chapter URLs to manga URL when pasted
+        val mangaPath = if (path.contains("/capitulo-")) path.substringBefore("/capitulo-") else path
+        if (mangaPath.isBlank()) return null
+        val manga = SManga.create().apply {
+            this.url = mangaPath.ensureStartsWithSlash()
+        }
+        return try {
+            fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = true).manga
+                .takeIf { it.title.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    private fun parseTrendingPage(response: Response): MangasPage {
-        val document = response.asJsoup()
-        val mangas = document.select(".tsl-slide").mapNotNull { slide ->
-            val title = slide.selectFirst(".tsl-title")?.text()?.trim().orEmpty()
-            val link = slide.selectFirst("a.tsl-cover[href], a.tsl-cta[href]") ?: return@mapNotNull null
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val targetUrl = getMangaUrl(manga)
+        var body = ""
+        var requestPath = ""
+        var document: Document? = null
+        client.get(targetUrl).use { response ->
+            body = response.body.string()
+            requestPath = response.request.url.encodedPath.trimEnd('/')
+            document = Jsoup.parse(body, baseUrl)
+        }
+        val doc = document!!
 
+        val updatedManga = if (fetchDetails) {
             SManga.create().apply {
-                this.title = title.ifEmpty { link.attr("title") }
-                url = link.attr("href")
-                    .substringAfter(baseUrl)
-                    .ensureStartsWithSlash()
-                thumbnail_url = slide.selectFirst(".tsl-cover img[src]")?.attr("abs:src")
+                url = manga.url
+                title = doc.selectFirst(".series-title")?.text()?.trim().orEmpty()
+                thumbnail_url = doc.selectFirst(".series-cover img[src], .series-hero img[src]")?.attr("abs:src")
+                description = doc.selectFirst(".series-desc")?.text()?.trim()
+                genre = doc.select(".series-tags a, .series-tags span")
+                    .map { it.text().trim() }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
+                    .joinToString(", ")
+                    .ifBlank { null }
+                status = parseStatus(doc.selectFirst(".badge-pill, .badge-ongoing")?.text())
             }
+        } else {
+            manga
         }
 
-        return MangasPage(mangas, true)
-    }
+        val updatedChapters = if (fetchChapters) {
+            val fromRsc = parseEmbeddedChapterNumbers(body).map { chapterNumber ->
+                SChapter.create().apply {
+                    name = "Capítulo $chapterNumber"
+                    url = chapterUrl(requestPath, chapterNumber)
+                    chapter_number = chapterNumber.toFloatOrNull() ?: 0f
+                }
+            }.sortedByDescending { it.chapter_number }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
-
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-
-        return SManga.create().apply {
-            title = document.selectFirst(".series-title")?.text()?.trim().orEmpty()
-            thumbnail_url = document.selectFirst(".series-cover img[src], .series-hero img[src]")?.attr("abs:src")
-            description = document.selectFirst(".series-desc")?.text()?.trim()
-            genre = document.select(".series-tags a, .series-tags span")
-                .map { it.text().trim() }
-                .filter { it.isNotEmpty() }
-                .distinct()
-                .joinToString(", ")
-                .ifBlank { null }
-            status = parseStatus(document.selectFirst(".badge-pill, .badge-ongoing")?.text())
+            if (fromRsc.isNotEmpty()) {
+                fromRsc
+            } else {
+                doc.select(".chapters-grid .ch-row[href]").mapNotNull { link ->
+                    val chapterNumber = link.attr("href").trimEnd('/').substringAfterLast("capitulo-")
+                    if (chapterNumber.isBlank()) return@mapNotNull null
+                    SChapter.create().apply {
+                        name = link.text().trim().ifEmpty { "Capítulo $chapterNumber" }
+                        url = link.attr("href")
+                            .substringAfter(baseUrl)
+                            .ensureStartsWithSlash()
+                        chapter_number = chapterNumber.toFloatOrNull() ?: 0f
+                    }
+                }.sortedByDescending { it.chapter_number }
+            }
+        } else {
+            chapters
         }
+
+        return SMangaUpdate(updatedManga, updatedChapters)
     }
 
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
-
-    override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val body = response.body.string()
-        val mangaPath = response.request.url.encodedPath.trimEnd('/')
-
-        val chapters = parseEmbeddedChapterNumbers(body).map { chapterNumber ->
-            SChapter.create().apply {
-                name = "Capítulo $chapterNumber"
-                url = chapterUrl(mangaPath, chapterNumber)
-                chapter_number = chapterNumber.toFloatOrNull() ?: 0f
-            }
-        }.sortedByDescending { it.chapter_number }
-
-        if (chapters.isNotEmpty()) return chapters
-
-        val document = Jsoup.parse(body, baseUrl)
-        return document.select(".chapters-grid .ch-row[href]").mapNotNull { link ->
-            val chapterNumber = link.attr("href").trimEnd('/').substringAfterLast("capitulo-")
-            if (chapterNumber.isBlank()) return@mapNotNull null
-
-            SChapter.create().apply {
-                name = link.text().trim().ifEmpty { "Capítulo $chapterNumber" }
-                url = link.attr("href")
-                    .substringAfter(baseUrl)
-                    .ensureStartsWithSlash()
-                chapter_number = chapterNumber.toFloatOrNull() ?: 0f
-            }
-        }.sortedByDescending { it.chapter_number }
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val document = Jsoup.parse(response.body.string(), response.request.url.toString())
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         val pages = document.select(
             "main img[src*='/WP-manga/data/'], " +
                 "main img[alt*='Página'], " +
@@ -213,20 +189,52 @@ abstract class ManhwaScan :
         return pages.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         Filter.Header("Filtrar por género"),
         GenreFilter(),
     )
+
+    private fun parseSeriesGrid(document: Document, forceHasNextPage: Boolean = false): MangasPage {
+        val mangas = document.selectFirst("main .series-grid")
+            ?.select(".s-card")
+            ?.mapNotNull { card ->
+                val link = card.selectFirst("a.s-card-title[href]") ?: return@mapNotNull null
+                SManga.create().apply {
+                    title = link.text().trim()
+                    url = link.attr("href")
+                        .substringAfter(baseUrl)
+                        .ensureStartsWithSlash()
+                    thumbnail_url = card.selectFirst(".s-card-img img[src]")?.attr("abs:src")
+                }
+            }
+            .orEmpty()
+
+        val hasNextPage = forceHasNextPage || document.selectFirst(".pager-btn[href]:matchesOwn(Siguiente)") != null
+        return MangasPage(mangas, hasNextPage)
+    }
+
+    private fun parseTrendingPage(document: Document): MangasPage {
+        val mangas = document.select(".tsl-slide").mapNotNull { slide ->
+            val title = slide.selectFirst(".tsl-title")?.text()?.trim().orEmpty()
+            val link = slide.selectFirst("a.tsl-cover[href], a.tsl-cta[href]") ?: return@mapNotNull null
+
+            SManga.create().apply {
+                this.title = title.ifEmpty { link.attr("title") }
+                url = link.attr("href")
+                    .substringAfter(baseUrl)
+                    .ensureStartsWithSlash()
+                thumbnail_url = slide.selectFirst(".tsl-cover img[src]")?.attr("abs:src")
+            }
+        }
+
+        return MangasPage(mangas, true)
+    }
 
     private fun exploreUrl(page: Int): String = if (page > 1) {
         "$baseUrl/explorar/page/$page/"
     } else {
         "$baseUrl/explorar/"
     }
-
-    private fun isHomePage(response: Response): Boolean = response.request.url.encodedPath == "/"
 
     private fun parseStatus(text: String?): Int = when {
         text.isNullOrBlank() -> SManga.UNKNOWN
@@ -270,23 +278,7 @@ abstract class ManhwaScan :
             ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = BASE_URL_PREF
-            title = "Editar URL de la fuente"
-            summary = "Para uso temporal, si la extensión se actualiza se perderá el cambio."
-            dialogTitle = "Editar URL de la fuente"
-            dialogMessage = "URL por defecto:\n$defaultBaseUrl"
-            setDefaultValue(defaultBaseUrl)
-            setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, "Reinicie la aplicación para aplicar los cambios", Toast.LENGTH_LONG).show()
-                true
-            }
-        }.also { screen.addPreference(it) }
-    }
-
     companion object {
-        private const val BASE_URL_PREF = "overrideBaseUrl"
         private const val PAGE_IMAGE_PATH_PREFIX = "/img/WP-manga/data/"
 
         private val CHAPTERS_REGEX = Regex("\\\\\\\"chapters\\\\\\\":\\[(.*?)\\\\\\\"slug\\\\\"", setOf(RegexOption.DOT_MATCHES_ALL))
