@@ -1,51 +1,36 @@
 package eu.kanade.tachiyomi.extension.es.zonatmonet
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
-import okhttp3.Headers
+import keiyoushi.utils.tryParseDateTime
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Request
-import okhttp3.Response
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-abstract class ZonatmoNet : HttpSource() {
+abstract class ZonatmoNet : KeiSource() {
 
-    override val supportsLatest = true
-
-    override fun headersBuilder() = super.headersBuilder()
-
-    private val apiHeaders: Headers by lazy {
-        headersBuilder()
-            .add("Referer", "$baseUrl/")
-            .build()
-    }
-
-    // ========================= Popular =========================
-
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val url = apiUrl.newBuilder()
             .addPathSegments("tops/views/month")
             .addQueryParameter("postType", "any")
             .addQueryParameter("postsPerPage", "50")
             .build()
 
-        return GET(url, apiHeaders)
-    }
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val dto = response.parseAs<TopViewsResponseDto>()
+        val dto = client.get(url).parseAs<TopViewsResponseDto>()
         val mangas = dto.data
             ?.items
             .orEmpty()
@@ -54,19 +39,13 @@ abstract class ZonatmoNet : HttpSource() {
         return MangasPage(mangas, false)
     }
 
-    // ========================= Latest =========================
-
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = apiUrl.newBuilder()
             .addPathSegments("listing/manga")
             .addQueryParameter("page", page.toString())
             .build()
 
-        return GET(url, apiHeaders)
-    }
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val dto = response.parseAs<ListingResponseDto>()
+        val dto = client.get(url).parseAs<ListingResponseDto>()
         val mangas = dto.data
             ?.items
             .orEmpty()
@@ -77,65 +56,43 @@ abstract class ZonatmoNet : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ========================= Search =========================
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val mangaSlug = query.toHttpUrlOrNull()
-            ?.takeIf(::isSupportedDeeplink)
-            ?.pathSegments
-            ?.getOrNull(1)
-            ?.takeIf { it.isNotBlank() }
-
-        val genreFilter = filters.filterIsInstance<GenreFilter>().firstOrNull()
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val genreFilter = filters.firstInstanceOrNull<GenreFilter>()
         val selectedGenres = genreFilter?.state?.filter { it.state }?.map { it.value }.orEmpty()
 
-        val typeFilter = filters.filterIsInstance<TypeFilter>().firstOrNull()
+        val typeFilter = filters.firstInstanceOrNull<TypeFilter>()
         val selectedTypes = typeFilter?.state?.filter { it.state }?.map { it.value }.orEmpty()
 
-        val statusFilter = filters.filterIsInstance<StatusFilter>().firstOrNull()
+        val statusFilter = filters.firstInstanceOrNull<StatusFilter>()
         val selectedStatuses = statusFilter?.state?.filter { it.state }?.map { it.value }.orEmpty()
 
-        val url = if (mangaSlug != null) {
-            singleMangaApiUrl(mangaSlug)
-        } else {
-            listingMangaApiUrl(
-                page = page,
-                searchQuery = query.trim().takeIf { it.isNotEmpty() },
-                genres = selectedGenres,
-                types = selectedTypes,
-                statuses = selectedStatuses,
-            )
-        }
+        val url = listingMangaApiUrl(
+            page = page,
+            searchQuery = query.trim().takeIf { it.isNotEmpty() },
+            genres = selectedGenres,
+            types = selectedTypes,
+            statuses = selectedStatuses,
+        )
 
-        return GET(url, apiHeaders)
+        return listingMangaParse(client.get(url).parseAs<ListingResponseDto>())
     }
 
-    // ========================= Filters =========================
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val baseHost = baseUrl.toHttpUrl().host
+        if (!(url.host == baseHost || url.host.endsWith(".$baseHost"))) return null
+        val slug = url.pathSegments.getOrNull(1)
+            ?.takeIf { url.pathSegments.getOrNull(0) == "manga" && it.isNotBlank() }
+            ?: return null
+        return fetchMangaDetails(SManga.create().apply { this.url = slug })
+    }
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         GenreFilter(),
         TypeFilter(),
         StatusFilter(),
     )
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val requestPath = response.request.url.encodedPath
-
-        return if (requestPath.contains("/single/manga/")) {
-            val manga = response.parseAs<SingleMangaResponseDto>()
-                .data
-                ?.toSManga()
-                ?.let(::listOf)
-                .orEmpty()
-
-            MangasPage(manga, false)
-        } else {
-            listingMangaParse(response)
-        }
-    }
-
-    private fun listingMangaParse(response: Response): MangasPage {
-        val dto = response.parseAs<ListingResponseDto>()
+    private fun listingMangaParse(dto: ListingResponseDto): MangasPage {
         val mangas = dto.data
             ?.items
             .orEmpty()
@@ -145,8 +102,6 @@ abstract class ZonatmoNet : HttpSource() {
 
         return MangasPage(mangas, hasNextPage)
     }
-
-    // ========================= Details =========================
 
     override fun getMangaUrl(manga: SManga): String = baseUrl.toHttpUrl().newBuilder()
         .addPathSegment("manga")
@@ -154,16 +109,27 @@ abstract class ZonatmoNet : HttpSource() {
         .build()
         .toString()
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(singleMangaApiUrl(manga.url), apiHeaders)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val dto = response.parseAs<SingleMangaResponseDto>()
-        val manga = dto.data ?: throw Exception("No se pudo obtener los detalles del manga")
-
-        return manga.toSManga() ?: throw Exception("Error al parsear los detalles del manga")
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val detailsAsync = async {
+            if (fetchDetails) fetchMangaDetails(manga) else manga
+        }
+        val chaptersAsync = async {
+            if (fetchChapters) fetchChapterList(manga.url) else chapters
+        }
+        SMangaUpdate(detailsAsync.await(), chaptersAsync.await())
     }
 
-    // ========================= Chapters =========================
+    private suspend fun fetchMangaDetails(manga: SManga): SManga {
+        val dto = client.get(singleMangaApiUrl(manga.url)).parseAs<SingleMangaResponseDto>()
+        val data = dto.data ?: throw Exception("No se pudo obtener los detalles del manga")
+
+        return data.toSManga() ?: throw Exception("Error al parsear los detalles del manga")
+    }
 
     override fun getChapterUrl(chapter: SChapter): String {
         val slugs = chapter.url.split("/", limit = 2)
@@ -178,40 +144,14 @@ abstract class ZonatmoNet : HttpSource() {
             .toString()
     }
 
-    override fun chapterListRequest(manga: SManga): Request {
-        val url = apiUrl.newBuilder()
-            .addPathSegment("single")
-            .addPathSegment("manga")
-            .addPathSegment(manga.url)
-            .addPathSegment("chapters")
-            .addQueryParameter("page", "1")
-            .addQueryParameter("postsPerPage", CHAPTERS_PER_PAGE.toString())
-            .addQueryParameter("order", "asc")
-            .build()
-
-        return GET(url, apiHeaders)
-    }
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val mangaSlug = response.request.url.pathSegments
-            .windowed(size = 2)
-            .firstOrNull { it.first() == "manga" }
-            ?.last()
-            ?.takeIf { it.isNotBlank() }
-            ?: return emptyList()
-
-        val firstPageDto = response.parseAs<ChapterListResponseDto>()
+    private suspend fun fetchChapterList(mangaSlug: String): List<SChapter> {
+        val firstPageDto = client.get(chapterListApiUrl(mangaSlug = mangaSlug, page = 1)).parseAs<ChapterListResponseDto>()
         val chapters = firstPageDto.data?.items.orEmpty().toMutableList()
 
         val totalPages = firstPageDto.data?.pagination?.totalPages ?: 1
         for (page in 2..totalPages) {
-            val nextPageResponse = client.newCall(
-                GET(chapterListApiUrl(mangaSlug = mangaSlug, page = page), apiHeaders),
-            ).execute()
-
-            nextPageResponse.use {
-                chapters += it.parseAs<ChapterListResponseDto>().data?.items.orEmpty()
-            }
+            chapters += client.get(chapterListApiUrl(mangaSlug = mangaSlug, page = page))
+                .parseAs<ChapterListResponseDto>().data?.items.orEmpty()
         }
 
         return chapters
@@ -220,43 +160,26 @@ abstract class ZonatmoNet : HttpSource() {
             .map { item -> item.toSChapter(mangaSlug) }
     }
 
-    // ========================= Pages =========================
-
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = baseUrl.toHttpUrl().resolve(chapter.url)!!
 
         val pathSegments = chapterUrl.pathSegments
         val mangaSlug = pathSegments[pathSegments.size - 2]
         val chapterSlug = pathSegments[pathSegments.size - 1]
 
-        return GET(singleChapterApiUrl(mangaSlug, chapterSlug), apiHeaders)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val chapter = response.parseAs<SingleChapterResponseDto>()
+        val data = client.get(singleChapterApiUrl(mangaSlug, chapterSlug)).parseAs<SingleChapterResponseDto>()
             .data
             ?.chapter
             ?: throw Exception("No se pudo obtener las páginas del capítulo")
 
-        return chapter.images
+        return data.images
             .sortedBy(ChapterImageDto::pageNumber)
             .mapIndexed { index, image ->
                 Page(
                     index = index,
-                    imageUrl = cdnImageUrl(chapter.jit, image.imageUrl),
+                    imageUrl = cdnImageUrl(data.jit, image.imageUrl),
                 )
             }
-    }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    // ========================= Utilities =========================
-
-    private fun isSupportedDeeplink(url: HttpUrl): Boolean {
-        if (url.host != SOURCE_HOST && url.host != "www.$SOURCE_HOST") return false
-
-        val pathSegments = url.pathSegments
-        return pathSegments.getOrNull(0) == "manga" && !pathSegments.getOrNull(1).isNullOrBlank()
     }
 
     private fun listingMangaApiUrl(
@@ -358,7 +281,7 @@ abstract class ZonatmoNet : HttpSource() {
         val cleanTitle = title.trim()
         name = "#$chapterNumber" + if (cleanTitle.isNotBlank()) " - $cleanTitle" else ""
         chapter_number = chapterNumber.toFloatOrNull() ?: -1f
-        date_upload = dateFormat.tryParse(releaseDate)
+        date_upload = dateFormat.tryParseDateTime(releaseDate)
     }
 
     private fun String?.toThumbnailUrl(): String? {
@@ -380,6 +303,6 @@ abstract class ZonatmoNet : HttpSource() {
         private val apiUrl = "https://$SOURCE_HOST/wp-api/api".toHttpUrl()
         private val uploadsUrl = "https://$SOURCE_HOST/wp-content/uploads".toHttpUrl()
 
-        private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
+        private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
     }
 }

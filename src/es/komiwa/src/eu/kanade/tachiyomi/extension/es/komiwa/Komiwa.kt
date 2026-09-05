@@ -1,33 +1,38 @@
 package eu.kanade.tachiyomi.extension.es.komiwa
 
-import eu.kanade.tachiyomi.network.GET
+import android.util.Base64
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
+import kotlin.time.Instant
 
 @Source
-abstract class Komiwa : HttpSource() {
+abstract class Komiwa : KeiSource() {
 
     private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
     private val apiUrl = "https://b78sk.komiwa.lat"
 
-    override val supportsLatest = true
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(3) { it.host == baseUrlHost }
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        rateLimit(3) { it.host == baseUrlHost }
+        addInterceptor { chain ->
+            val request = chain.request()
+            val referer = request.url.fragment?.takeIf { it.isNotBlank() }
+                ?: return@addInterceptor chain.proceed(request)
+            chain.proceed(request.newBuilder().header("Referer", referer).build())
+        }
+    }
 
     private val rscHeaders by lazy {
         headersBuilder()
@@ -35,15 +40,11 @@ abstract class Komiwa : HttpSource() {
             .build()
     }
 
-    override fun popularMangaRequest(page: Int): Request = GET(catalogUrl(page, "views"), rscHeaders)
+    override suspend fun getPopularManga(page: Int): MangasPage = parseSearchBody(client.get(catalogUrl(page, "views"), rscHeaders).use { it.body.string() })
 
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = parseSearchBody(client.get(catalogUrl(page, "updatedAt"), rscHeaders).use { it.body.string() })
 
-    override fun latestUpdatesRequest(page: Int): Request = GET(catalogUrl(page, "updatedAt"), rscHeaders)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = catalogPath(page).toHttpUrl().newBuilder()
 
         var sortBy = "views"
@@ -67,16 +68,25 @@ abstract class Komiwa : HttpSource() {
             url.addQueryParameter("q", query)
         }
 
-        return GET(url.build(), rscHeaders)
+        return parseSearchBody(client.get(url.build(), rscHeaders).use { it.body.string() })
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val body = response.body.string()
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        if (url.pathSegments.getOrNull(0) != "manga") return null
+        val id = url.pathSegments.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return null
+        val slug = url.pathSegments.getOrNull(2).orEmpty()
+        val manga = SManga.create().apply {
+            this.url = if (slug.isNotBlank()) "$id/$slug" else id
+        }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
+
+    private fun parseSearchBody(body: String): MangasPage {
         val mangas = parseInitialItems(body)
         val total = extractInt(body, """"initialTotal":""", ",")
         val page = extractInt(body, """"initialPage":""", ",")
-        val limit = 24
-        val hasNextPage = (page * limit) < total
+        val hasNextPage = (page * PAGE_LIMIT) < total
         return MangasPage(mangas, hasNextPage)
     }
 
@@ -99,18 +109,26 @@ abstract class Komiwa : HttpSource() {
     }
 
     override fun getMangaUrl(manga: SManga): String {
-        val (id, slug) = manga.url.split("/", limit = 2)
-        return "$baseUrl/manga/$id/$slug"
-    }
-
-    override fun mangaDetailsRequest(manga: SManga): Request {
         val id = manga.url.substringBefore("/")
-        return GET("$apiUrl/manga/$id", headers)
+        val slug = manga.url.substringAfter("/", "")
+        return if (slug.isNotEmpty()) "$baseUrl/manga/$id/$slug" else "$baseUrl/manga/$id"
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val body = response.body.string()
-        val id = response.request.url.pathSegments.last()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val id = manga.url.substringBefore("/")
+        val body = client.get("$apiUrl/manga/$id").use { it.body.string() }
+        return SMangaUpdate(
+            manga = parseMangaDetails(body, id),
+            chapters = parseChapterList(body),
+        )
+    }
+
+    private fun parseMangaDetails(body: String, id: String): SManga {
         val slug = extractString(body, "\"slug\":\"", "\"") ?: id
 
         return SManga.create().apply {
@@ -132,10 +150,7 @@ abstract class Komiwa : HttpSource() {
 
     override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/chapter/${chapter.url}"
 
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val body = response.body.string()
+    private fun parseChapterList(body: String): List<SChapter> {
         val chaptersObject = extractJsonArray(body, """"chapters":""")
         val chaptersArray = extractJsonArray(chaptersObject, """"chapters":""")
         if (chaptersArray.isBlank()) return emptyList()
@@ -161,10 +176,9 @@ abstract class Komiwa : HttpSource() {
         return result
     }
 
-    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/chapter/${chapter.url}", rscHeaders)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val body = response.body.string()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val chapterUrl = getChapterUrl(chapter)
+        val body = client.get(chapterUrl, rscHeaders).use { it.body.string() }
         val pagesArray = extractJsonArray(body, """"pages":""")
         if (pagesArray.isBlank()) return emptyList()
 
@@ -177,21 +191,11 @@ abstract class Komiwa : HttpSource() {
             }
         }
         return images.distinct().mapIndexed { i, url ->
-            Page(i, url = response.request.url.toString(), imageUrl = url)
+            Page(i, url = chapterUrl, imageUrl = "${proxyImageUrl(url)}#$chapterUrl")
         }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = super.headersBuilder()
-            .add("Referer", page.url.ifBlank { "$baseUrl/" })
-            .build()
-
-        return GET(page.imageUrl!!, imageHeaders)
-    }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    override fun getFilterList(): FilterList = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         SortByFilter("Ordenar por", getSortList()),
     )
 
@@ -215,6 +219,7 @@ abstract class Komiwa : HttpSource() {
 
     companion object {
         private const val PAGE_LIMIT = 24
+        private const val IMAGE_PROXY_URL = "https://x4v1.komiwa.net/v/"
 
         private fun extractString(body: String, prefix: String, suffix: String): String? {
             val start = body.indexOf(prefix)
@@ -263,17 +268,7 @@ abstract class Komiwa : HttpSource() {
             return ""
         }
 
-        private fun tryParseDate(dateString: String?): Long {
-            if (dateString == null) return 0
-            return try {
-                java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US)
-                    .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-                    .parse(dateString)
-                    ?.time ?: 0
-            } catch (_: Exception) {
-                0
-            }
-        }
+        private fun tryParseDate(dateString: String?): Long = Instant.tryParse(dateString)
 
         private fun extractStringNear(body: String, nearId: String, pattern: String): String? {
             val nearIndex = body.indexOf(nearId)
@@ -303,6 +298,11 @@ abstract class Komiwa : HttpSource() {
             .replace("\\/", "/")
             .replace("\\u002F", "/")
             .replace("\\u0026", "&")
+
+        private fun proxyImageUrl(url: String): String = IMAGE_PROXY_URL + Base64.encodeToString(
+            url.toByteArray(),
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+        )
 
         private fun parseStatus(raw: String?): Int = when (raw?.lowercase()) {
             "ongoing", "en curso" -> SManga.ONGOING

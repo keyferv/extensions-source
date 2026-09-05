@@ -1,81 +1,63 @@
 package eu.kanade.tachiyomi.extension.es.undertranslations
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.tryParseDate
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
-import java.text.SimpleDateFormat
+import org.jsoup.nodes.Document
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-class UnderTranslations(
-    override val lang: String,
-    override val id: Long,
-) : HttpSource() {
+abstract class UnderTranslations : KeiSource() {
 
-    override val name = "UnderTranslations"
+    private val dateFormat = DateTimeFormatter.ofPattern("MMMM dd, yyyy", Locale("es", "MX"))
 
-    override val baseUrl = "https://undertranslations.com"
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
+    }
 
-    override val supportsLatest = true
-
-    @Suppress("DEPRECATION")
-    private val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es", "MX"))
-
-    // ──── Headers ────
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
-
-    // ──── Popular ────
-
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val url = "$baseUrl/manga/".toHttpUrl().newBuilder()
             .addQueryParameter("order", "popular")
             .apply { if (page > 1) addQueryParameter("page", page.toString()) }
             .build()
-        return GET(url, headers)
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun popularMangaParse(response: Response): MangasPage = parseMangaList(response)
-
-    // ──── Latest Updates ────
-
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = "$baseUrl/manga/".toHttpUrl().newBuilder()
             .addQueryParameter("order", "update")
             .apply { if (page > 1) addQueryParameter("page", page.toString()) }
             .build()
-        return GET(url, headers)
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun latestUpdatesParse(response: Response): MangasPage = parseMangaList(response)
-
-    // ──── Search ────
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$baseUrl/".toHttpUrl().newBuilder()
             .addQueryParameter("s", query)
             .apply { if (page > 1) addQueryParameter("page", page.toString()) }
             .build()
-        return GET(url, headers)
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = parseMangaList(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val manga = SManga.create().apply { setUrlWithoutDomain(url.toString()) }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
 
-    // ──── Shared list parsing ────
-
-    private fun parseMangaList(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun parseMangaList(document: Document): MangasPage {
         val cards = document.select("div.bsx")
 
         val mangas = cards.map { card ->
@@ -85,7 +67,7 @@ class UnderTranslations(
                 title = link.attr("title").ifBlank {
                     card.selectFirst(".tt")?.text() ?: "Unknown"
                 }
-                url = link.attr("href").substringAfter(baseUrl).ifEmpty { "/" }
+                setUrlWithoutDomain(link.attr("abs:href"))
                 thumbnail_url = card.selectFirst("img[src]")?.attr("abs:src")
             }
         }
@@ -95,41 +77,44 @@ class UnderTranslations(
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ──── Manga Details ────
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(
+            manga = parseMangaDetails(document, manga),
+            chapters = parseChapterList(document),
+        )
+    }
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$baseUrl${manga.url}", headers)
+    private fun parseMangaDetails(document: Document, manga: SManga): SManga = SManga.create().apply {
+        url = manga.url
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
+        title = document.selectFirst(".entry-title")?.text()
+            ?: document.selectFirst("h1.entry-title")?.text()
+            ?: "Unknown"
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+        thumbnail_url = document.selectFirst(".thumb img[src]")?.attr("abs:src")
 
-        return SManga.create().apply {
-            title = document.selectFirst(".entry-title")?.text()
-                ?: document.selectFirst("h1.entry-title")?.text()
-                ?: "Unknown"
+        description = document.select(".info-desc .wd-full")
+            .firstOrNull { it.select(".entry-content").isNotEmpty() }
+            ?.select(".entry-content p")
+            ?.joinToString("\n") { it.text() }
 
-            thumbnail_url = document.selectFirst(".thumb img[src]")?.attr("abs:src")
+        status = parseStatus(document.selectFirst(".spe span")?.text())
 
-            description = document.select(".info-desc .wd-full")
-                .firstOrNull { it.select(".entry-content").isNotEmpty() }
-                ?.select(".entry-content p")
-                ?.joinToString("\n") { it.text() }
+        genre = document.select(".mgen a")
+            .joinToString { it.text() }
 
-            // Parse status (no status element found on this site)
-            status = parseStatus(document.selectFirst(".spe span")?.text())
-
-            // Genres
-            genre = document.select(".mgen a")
-                .joinToString(", ") { it.text() }
-
-            author = document.selectFirst(
-                ".infotable tr:contains(Autor) td:last-child, " +
-                    ".infotable tr:contains(autor) td:last-child",
-            )?.text()
-                ?: document.selectFirst("td:contains(Autor) + td")?.text()
-                ?: "Desconocido"
-        }
+        author = document.selectFirst(
+            ".infotable tr:contains(Autor) td:last-child, " +
+                ".infotable tr:contains(autor) td:last-child",
+        )?.text()
+            ?: document.selectFirst("td:contains(Autor) + td")?.text()
+            ?: "Desconocido"
     }
 
     private fun parseStatus(text: String?): Int = when {
@@ -142,12 +127,7 @@ class UnderTranslations(
         else -> SManga.UNKNOWN
     }
 
-    // ──── Chapter List ────
-
-    override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl${manga.url}", headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+    private fun parseChapterList(document: Document): List<SChapter> {
         val chapters = document.select("#chapterlist li")
 
         return chapters.mapNotNull { li ->
@@ -156,28 +136,17 @@ class UnderTranslations(
             val dateSpan = li.selectFirst(".chapterdate")
             val dataNum = li.attr("data-num")
 
-            val chapterName = numSpan?.text()?.trim()
-                ?: link.text().trim()
+            val chapterName = numSpan?.text()
+                ?: link.text().ifBlank { return@mapNotNull null }
             val chapterNum = dataNum.ifBlank { chapterName }
 
             SChapter.create().apply {
                 name = chapterName
-                url = link.attr("href").substringAfter(baseUrl).ifEmpty { "/" }
-                date_upload = parseChapterDate(dateSpan?.text())
+                setUrlWithoutDomain(link.attr("abs:href"))
+                date_upload = dateFormat.tryParseDate(dateSpan?.text())
                 chapter_number = parseChapterNumber(chapterNum)
             }
         }.sortedByDescending { it.chapter_number }
-    }
-
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
-
-    private fun parseChapterDate(dateText: String?): Long {
-        if (dateText.isNullOrBlank()) return 0L
-        return try {
-            dateFormat.parse(dateText.trim())?.time ?: 0L
-        } catch (_: Exception) {
-            0L
-        }
     }
 
     private fun parseChapterNumber(num: String): Float = try {
@@ -188,12 +157,8 @@ class UnderTranslations(
         0f
     }
 
-    // ──── Page List (Images) ────
-
-    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val body = response.body.string()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val body = client.get(getChapterUrl(chapter)).use { it.body.string() }
 
         // Reader images are injected by ts_reader.run({...}) into an empty #readerarea.
         val imagesBlock = IMAGES_ARRAY_REGEX.find(body)
@@ -207,8 +172,6 @@ class UnderTranslations(
 
         return images.mapIndexed { index, url -> Page(index, imageUrl = url) }
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     companion object {
         private val IMAGES_ARRAY_REGEX = Regex(

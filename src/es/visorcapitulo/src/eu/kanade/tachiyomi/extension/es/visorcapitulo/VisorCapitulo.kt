@@ -1,60 +1,53 @@
 package eu.kanade.tachiyomi.extension.es.visorcapitulo
 
-import android.os.Handler
-import android.os.Looper
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.applicationContext
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.runWebView
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
-import java.text.SimpleDateFormat
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import org.jsoup.nodes.Document
+import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class VisorCapitulo : HttpSource() {
+abstract class VisorCapitulo : KeiSource() {
 
-    override val supportsLatest = true
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3)
 
-    override val client = network.client.newBuilder()
-        .rateLimit(3)
-        .build()
-
-    // ================= Popular =================
-
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val url = "$baseUrl/manga/".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .build()
-        return GET(url, headers)
+        return popularMangaParse(client.get(url).asJsoup())
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun popularMangaParse(document: Document): MangasPage {
         val mangas = document.select("div.list-item").map { element ->
             SManga.create().apply {
                 title = element.selectFirst("a.list-title")!!.text()
                 thumbnail_url = element.selectFirst("img.list-img")?.let {
                     baseUrl + it.attr("src")
                 }
-                setUrlWithoutDomain(element.selectFirst("a.list-title")!!.attr("href"))
+                url = canonicalMangaUrl(element.selectFirst("a.list-title")!!.attr("abs:href"))
             }
         }
         val hasNextPage = document.selectFirst("a[rel=next], li.page-item:last-child a.page-link") != null &&
@@ -62,22 +55,16 @@ abstract class VisorCapitulo : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ================= Latest =================
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getPopularManga(page)
 
-    override fun latestUpdatesRequest(page: Int): Request = popularMangaRequest(page)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    // ================= Search =================
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val genreFilter = filters.filterIsInstance<GenreFilter>().firstOrNull()
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val genreFilter = filters.firstInstanceOrNull<GenreFilter>()
 
         return if (query.isNotBlank()) {
             val url = "$baseUrl/search/".toHttpUrl().newBuilder()
                 .addQueryParameter("q", query)
                 .build()
-            GET(url, headers)
+            searchMangaJsonParse(client.get(url).parseAs<List<SearchResultDto>>())
         } else if (genreFilter != null) {
             val selectedGenre = genreFilter.state.filter { it.state }.map { it.key }
             if (selectedGenre.isNotEmpty()) {
@@ -85,177 +72,138 @@ abstract class VisorCapitulo : HttpSource() {
                     .addQueryParameter("genre", selectedGenre.first())
                     .addQueryParameter("page", page.toString())
                     .build()
-                GET(url, headers)
+                popularMangaParse(client.get(url).asJsoup())
             } else {
-                popularMangaRequest(page)
+                getPopularManga(page)
             }
         } else {
-            popularMangaRequest(page)
+            getPopularManga(page)
         }
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val url = response.request.url.toString()
-        return if (url.contains("/search/")) {
-            searchMangaJsonParse(response)
-        } else {
-            popularMangaParse(response)
-        }
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        if (url.pathSegments.firstOrNull() != "manga") return null
+        val manga = SManga.create().apply { this.url = canonicalMangaUrl(url.toString()) }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
     }
 
-    private fun searchMangaJsonParse(response: Response): MangasPage {
-        val results = response.parseAs<List<SearchResultDto>>()
+    private fun searchMangaJsonParse(results: List<SearchResultDto>): MangasPage {
         val mangas = results.map { result ->
             SManga.create().apply {
                 title = result.title
                 thumbnail_url = if (result.image.startsWith("http")) result.image else baseUrl + result.image
-                url = result.link
+                url = canonicalMangaUrl(result.link)
             }
         }
         return MangasPage(mangas, false)
     }
 
-    // ================= Filters =================
-
-    override fun getFilterList(): FilterList = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         GenreFilter("Géneros", getGenreList()),
     )
 
-    // ================= Details =================
-
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(baseUrl + manga.url, headers)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst("h1.fw-bold")!!.text()
-            thumbnail_url = document.selectFirst("img.manga-main-img")?.let {
-                baseUrl + it.attr("src")
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(baseUrl + manga.url).asJsoup()
+        val canonicalUrl = document.selectFirst("tr.chapter-row a")
+            ?.attr("abs:href")
+            ?.toHttpUrlOrNull()
+            ?.let { chapterUrl ->
+                chapterUrl.pathSegments
+                    .takeIf { it.size >= 3 && it.first() == "manga" }
+                    ?.let { segments -> "/${segments[0]}/${segments[1]}/" }
             }
-            author = document.selectFirst("p:has(span.meta-label:contains(Author))")
-                ?.text()?.substringAfter(":")?.trim()
-            status = document.selectFirst("p:has(span.meta-label:contains(Status))")
-                ?.text()?.substringAfter(":")?.trim().parseStatus()
-            genre = document.select("a.genre-link").joinToString { it.text() }
-            description = document.selectFirst("p:has(span.meta-label:contains(Synopsis))")
-                ?.ownText()?.trim()
+            ?: canonicalMangaUrl(manga.url)
+
+        return SMangaUpdate(
+            manga = parseMangaDetails(document, canonicalUrl),
+            chapters = parseChapterList(document),
+        )
+    }
+
+    private fun parseMangaDetails(document: Document, mangaUrl: String): SManga = SManga.create().apply {
+        url = mangaUrl
+        title = document.selectFirst("h1.fw-bold")!!.text()
+        thumbnail_url = document.selectFirst("img.manga-main-img")?.let {
+            baseUrl + it.attr("src")
+        }
+        author = document.selectFirst("p:has(span.meta-label:contains(Author))")
+            ?.text()?.substringAfter(":")?.trim()
+        status = document.selectFirst("p:has(span.meta-label:contains(Status))")
+            ?.text()?.substringAfter(":")?.trim().parseStatus()
+        genre = document.select("a.genre-link").joinToString { it.text() }
+        description = document.selectFirst("p:has(span.meta-label:contains(Synopsis))")
+            ?.ownText()
+    }
+
+    private fun parseChapterList(document: Document): List<SChapter> = document.select("tr.chapter-row").map { row ->
+        SChapter.create().apply {
+            name = row.selectFirst("td a")!!.text()
+            date_upload = row.select("td").getOrNull(2)?.text()?.let { dateFormat.tryParseDate(it) } ?: 0L
+            setUrlWithoutDomain(row.selectFirst("td a")!!.attr("abs:href"))
         }
     }
 
-    // ================= Chapters =================
-
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        return document.select("tr.chapter-row").map { row ->
-            SChapter.create().apply {
-                name = row.selectFirst("td a")!!.text()
-                date_upload = row.select("td").getOrNull(2)?.text()?.let { dateFormat.tryParse(it) } ?: 0L
-                setUrlWithoutDomain(row.selectFirst("td a")!!.attr("href"))
-            }
-        }
-    }
-
-    // ================= Pages =================
-
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        val dataEl = document.selectFirst("i#data") ?: return emptyList()
-        val encodedData = dataEl.attr("data-data")
-        val chapterUrl = response.request.url.toString()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val chapterUrl = getChapterUrl(chapter)
+        val document = client.get(chapterUrl).asJsoup()
+        val encodedData = document.selectFirst("i#data")?.attr("data-data") ?: return emptyList()
 
         if (encodedData.length < 11) return emptyList()
 
-        val pageData = decodeWithWebView(chapterUrl, encodedData)
-        if (pageData != null) {
-            return pageData.imagesLink.mapIndexed { index, url ->
-                Page(index, imageUrl = url)
-            }
+        val pageData = decodeWithWebView(chapterUrl) ?: return emptyList()
+        return pageData.imagesLink.mapIndexed { index, url ->
+            Page(index, imageUrl = url)
         }
-
-        return emptyList()
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    /**
-     * Uses WebView to decode chapter image URLs.
-     * The site's JavaScript uses a substitution cipher that changes per chapter,
-     * so we need to execute the site's own decode logic to get the image URLs.
-     */
-    private fun decodeWithWebView(chapterUrl: String, encodedData: String): ChapterDataDto? {
-        val latch = CountDownLatch(1)
-        var result: ChapterDataDto? = null
-
-        Handler(Looper.getMainLooper()).post {
-            val webView = WebView(applicationContext)
-            webView.settings.javaScriptEnabled = true
-            webView.settings.domStorageEnabled = true
-
-            webView.addJavascriptInterface(
-                object {
-                    @JavascriptInterface
-                    fun onImagesReady(json: String) {
-                        result = runCatching { json.parseAs<ChapterDataDto>() }.getOrNull()
-                        latch.countDown()
-                    }
-                },
-                "Android",
-            )
-
-            webView.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    // Switch to vertical mode to load all images, then extract
-                    view?.evaluateJavascript(
-                        """
-                        (function() {
-                            var readerMode = document.getElementById('reader-mode');
-                            if (readerMode && readerMode.value !== '1002') {
-                                readerMode.value = '1002';
-                                readerMode.dispatchEvent(new Event('change'));
+    private suspend fun decodeWithWebView(chapterUrl: String): ChapterDataDto? = try {
+        runWebView<ChapterDataDto?>(timeout = 15.seconds) {
+            jsBridge("Android") { json ->
+                resolve(runCatching { json.parseAs<ChapterDataDto>() }.getOrNull())
+            }
+            onPageFinished {
+                evaluateJs(
+                    """
+                    (function() {
+                        var readerMode = document.getElementById('reader-mode');
+                        if (readerMode && readerMode.value !== '1002') {
+                            readerMode.value = '1002';
+                            readerMode.dispatchEvent(new Event('change'));
+                        }
+                        setTimeout(function() {
+                            var imgs = [];
+                            var fullReader = document.getElementById('full-reader');
+                            if (fullReader) {
+                                var images = fullReader.querySelectorAll('img');
+                                for (var i = 0; i < images.length; i++) {
+                                    if (images[i].src && !images[i].src.startsWith('data:')) {
+                                        imgs.push(images[i].src);
+                                    }
+                                }
                             }
-                            setTimeout(function() {
-                                var imgs = [];
-                                var fullReader = document.getElementById('full-reader');
-                                if (fullReader) {
-                                    var images = fullReader.querySelectorAll('img');
-                                    for (var i = 0; i < images.length; i++) {
-                                        if (images[i].src && !images[i].src.startsWith('data:')) {
-                                            imgs.push(images[i].src);
-                                        }
-                                    }
+                            if (imgs.length === 0) {
+                                var singleImg = document.querySelector('#single-reader img');
+                                if (singleImg && singleImg.src && !singleImg.src.startsWith('data:')) {
+                                    imgs.push(singleImg.src);
                                 }
-                                if (imgs.length === 0) {
-                                    var singleImg = document.querySelector('#single-reader img');
-                                    if (singleImg && singleImg.src && !singleImg.src.startsWith('data:')) {
-                                        imgs.push(singleImg.src);
-                                    }
-                                }
-                                Android.onImagesReady(JSON.stringify({images_link: imgs}));
-                            }, 2000);
-                        })()
-                        """.trimIndent(),
-                        null,
-                    )
-                }
+                            }
+                            Android.post(JSON.stringify({images_link: imgs}));
+                        }, 2000);
+                    })()
+                    """.trimIndent(),
+                )
             }
-
-            webView.loadUrl(chapterUrl)
-
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (latch.count > 0) {
-                    latch.countDown()
-                }
-                webView.destroy()
-            }, 15000)
+            loadUrl(chapterUrl)
         }
-
-        latch.await(20, TimeUnit.SECONDS)
-        return result
+    } catch (_: Exception) {
+        null
     }
-
-    // ================= Helpers =================
 
     private fun String?.parseStatus(): Int = when (this?.lowercase()) {
         "ongoing", "publishing" -> SManga.ONGOING
@@ -265,7 +213,12 @@ abstract class VisorCapitulo : HttpSource() {
         else -> SManga.UNKNOWN
     }
 
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+    private fun canonicalMangaUrl(value: String): String {
+        val parsed = value.toHttpUrlOrNull() ?: return value
+        return parsed.encodedPath
+    }
+
+    private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
 
     @Serializable
     private class SearchResultDto(
@@ -277,7 +230,7 @@ abstract class VisorCapitulo : HttpSource() {
 
     @Serializable
     private class ChapterDataDto(
-        @kotlinx.serialization.SerialName("images_link") val imagesLink: List<String> = emptyList(),
+        @SerialName("images_link") val imagesLink: List<String> = emptyList(),
     )
 
     private fun getGenreList() = listOf(

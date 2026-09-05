@@ -6,32 +6,34 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 @Source
-abstract class Zonatmo : HttpSource() {
+abstract class Zonatmo : KeiSource() {
 
     private val imageClient: OkHttpClient by lazy {
         network.client.newBuilder().build()
     }
 
-    override val supportsLatest = true
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        add("Accept-Language", "es-ES,es;q=0.9")
+    }
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add("Accept-Language", "es-ES,es;q=0.9")
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor { chain ->
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        addInterceptor { chain ->
             val request = chain.request()
             val isChapterImage = request.url.host == "storage.zonatmo.org" &&
                 request.url.encodedPath.contains("/chapters/")
@@ -57,32 +59,22 @@ abstract class Zonatmo : HttpSource() {
                 .body(bytes.toResponseBody(mediaType))
                 .build()
         }
-        .build()
+    }
 
-    // ========================= Popular =========================
-
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val url = "$baseUrl/biblioteca".toHttpUrl().newBuilder()
             .addQueryParameter("sort", "likes")
             .addQueryParameter("order", "DESC")
             .addQueryParameter("page", page.toString())
             .build()
-        return GET(url, headers)
+        return browseParse(client.get(url).asJsoup())
     }
 
-    override fun popularMangaParse(response: Response): MangasPage = browseParse(response)
-
-    // ========================= Latest =========================
-
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = "$baseUrl/ultimas-subidas".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .build()
-        return GET(url, headers)
-    }
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+        val document = client.get(url).asJsoup()
         val mangas = document.select("div.upload-file-row")
             .mapNotNull(::parseLatestCard)
             .distinctBy { "${it.title.lowercase()}|${it.thumbnail_url.orEmpty()}" }
@@ -93,9 +85,7 @@ abstract class Zonatmo : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ========================= Search =========================
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$baseUrl/biblioteca".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
 
@@ -128,14 +118,18 @@ abstract class Zonatmo : HttpSource() {
             }
         }
 
-        return GET(url.build(), headers)
+        return browseParse(client.get(url.build()).asJsoup())
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = browseParse(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val baseHost = baseUrl.toHttpUrl().host
+        if (!(url.host == baseHost || url.host.endsWith(".$baseHost"))) return null
+        if (!url.encodedPath.startsWith("/library/")) return null
+        val manga = SManga.create().apply { setUrlWithoutDomain(url.toString()) }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
 
-    // ========================= Filters =========================
-
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         SortFilter(),
         SortOrderFilter(),
         TypeFilter(),
@@ -144,13 +138,10 @@ abstract class Zonatmo : HttpSource() {
         GenreFilter(),
     )
 
-    // ========================= Browse parse =========================
-
-    private fun browseParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun browseParse(document: Document): MangasPage {
         val mangas = document.select("a[href*=/library/]")
             .filter { link -> link.selectFirst("img") != null && link.selectFirst("h4") != null }
-            .distinctBy { it.attr("href") }
+            .distinctBy { it.attr("abs:href") }
             .mapNotNull(::parseCard)
 
         val hasNextPage = document.select("nav a[href*=\"page=\"]")
@@ -159,100 +150,86 @@ abstract class Zonatmo : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ========================= Details =========================
-
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
-
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val (document, mangaUrl) = resolveSeriesDocument(response)
-
-        return SManga.create().apply {
-            url = mangaUrl
-
-            title = document.selectFirst("h1.element-title")
-                ?.text()
-                ?.trim()
-                ?.replace(Regex("\\s*\\(\\d{4}\\)\\s*$"), "")
-                ?: throw Exception("Título no encontrado")
-
-            thumbnail_url = document.selectFirst("img.book-thumbnail")
-                ?.attr("abs:src")
-                ?.takeIf { it.isNotBlank() && it.startsWith("http") }
-
-            description = document.selectFirst("p.element-description, #manga-synopsis")
-                ?.text()
-                ?.trim()
-                ?.ifBlank { null }
-
-            genre = document.select("h6 a.badge[href*=biblioteca?genders], h6 a.badge.badge-primary")
-                .eachText()
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString()
-                .ifBlank { null }
-
-            author = document.select("a[href*=filter_by=author]")
-                .eachText()
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString()
-                .ifBlank { null }
-
-            status = parseStatus(
-                document.selectFirst("span.book-status")
-                    ?.text()
-                    ?.trim(),
-            )
-        }
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        val (seriesDocument, mangaUrl) = resolveSeriesDocument(document)
+        return SMangaUpdate(
+            manga = parseMangaDetails(seriesDocument, mangaUrl),
+            chapters = parseChapterList(seriesDocument),
+        )
     }
 
-    // ========================= Chapters =========================
+    private fun parseMangaDetails(document: Document, mangaUrl: String): SManga = SManga.create().apply {
+        url = mangaUrl
 
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
+        title = document.selectFirst("h1.element-title")
+            ?.text()
+            ?.replace(Regex("\\s*\\(\\d{4}\\)\\s*$"), "")
+            ?: throw Exception("Título no encontrado")
 
-    override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
+        thumbnail_url = document.selectFirst("img.book-thumbnail")
+            ?.attr("abs:src")
+            ?.takeIf { it.isNotBlank() && it.startsWith("http") }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val (document, _) = resolveSeriesDocument(response)
+        description = document.selectFirst("p.element-description, #manga-synopsis")
+            ?.text()
+            ?.ifBlank { null }
 
-        return document.select("li.upload-link")
-            .mapNotNull { li ->
-                val chapterNum = li.attr("data-chapter-number")
-                    .ifBlank { null }
-                    ?: li.selectFirst("span.chapter-number")
-                        ?.attr("data-number")
-                        ?.ifBlank { null }
-                    ?: return@mapNotNull null
+        genre = document.select("h6 a.badge[href*=biblioteca?genders], h6 a.badge.badge-primary")
+            .eachText()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString()
+            .ifBlank { null }
 
-                val readLink = li.selectFirst("a.btn.btn-primary[href*=/view_uploads/]")
-                    ?.attr("abs:href")
+        author = document.select("a[href*=filter_by=author]")
+            .eachText()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString()
+            .ifBlank { null }
+
+        status = parseStatus(
+            document.selectFirst("span.book-status")
+                ?.text(),
+        )
+    }
+
+    private fun parseChapterList(document: Document): List<SChapter> = document.select("li.upload-link")
+        .mapNotNull { li ->
+            val chapterNum = li.attr("data-chapter-number")
+                .ifBlank { null }
+                ?: li.selectFirst("span.chapter-number")
+                    ?.attr("data-number")
                     ?.ifBlank { null }
-                    ?: return@mapNotNull null
+                ?: return@mapNotNull null
 
-                val titleSpan = li.selectFirst("span.chapter-number")
-                    ?.text()
-                    ?.trim()
-                    ?: "Capítulo $chapterNum"
+            val readLink = li.selectFirst("a.btn.btn-primary[href*=/view_uploads/]")
+                ?.attr("abs:href")
+                ?.ifBlank { null }
+                ?: return@mapNotNull null
 
-                SChapter.create().apply {
-                    name = titleSpan
-                    url = readLink.removePrefix(baseUrl)
-                    chapter_number = chapterNum.toFloatOrNull() ?: -1f
-                }
+            val titleSpan = li.selectFirst("span.chapter-number")
+                ?.text()
+                ?: "Capítulo $chapterNum"
+
+            SChapter.create().apply {
+                name = titleSpan
+                setUrlWithoutDomain(readLink)
+                chapter_number = chapterNum.toFloatOrNull() ?: -1f
             }
-            .distinctBy { it.url }
-    }
+        }
+        .distinctBy { it.url }
 
-    // ========================= Pages =========================
-
-    override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
 
         val pages = document.select("img.reader-image, img[alt*=Página]")
             .mapNotNull { img ->
@@ -283,18 +260,14 @@ abstract class Zonatmo : HttpSource() {
         )
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    // ========================= Utilities =========================
-
     private fun parseCard(link: Element): SManga? {
-        val href = link.attr("href").ifBlank { return null }
+        val href = link.attr("abs:href").ifBlank { return null }
         if (!href.contains("/library/")) return null
 
-        val title = link.selectFirst("h4")?.text()?.trim() ?: return null
+        val title = link.selectFirst("h4")?.text() ?: return null
 
         return SManga.create().apply {
-            url = href.removePrefix(baseUrl).ifBlank { return null }
+            setUrlWithoutDomain(href)
             this.title = title
             thumbnail_url = link.selectFirst("img")
                 ?.attr("abs:src")
@@ -304,7 +277,7 @@ abstract class Zonatmo : HttpSource() {
 
     private fun parseLatestCard(row: Element): SManga? {
         val link = row.selectFirst("a[href*=/view_uploads/]") ?: return null
-        val title = row.selectFirst(".thumbnail-title h4")?.text()?.trim() ?: return null
+        val title = row.selectFirst(".thumbnail-title h4")?.text() ?: return null
         val href = link.attr("abs:href").ifBlank { return null }
         val coverUrl = row.selectFirst("style")
             ?.data()
@@ -312,15 +285,14 @@ abstract class Zonatmo : HttpSource() {
             ?.let { if (it.startsWith("http")) it else "$baseUrl$it" }
 
         return SManga.create().apply {
-            url = href.removePrefix(baseUrl)
+            setUrlWithoutDomain(href)
             this.title = title
             thumbnail_url = coverUrl?.takeIf { it.startsWith("http") }
         }
     }
 
-    private fun resolveSeriesDocument(response: Response): Pair<Document, String> {
-        val document = response.asJsoup()
-        val requestPath = response.request.url.encodedPath
+    private suspend fun resolveSeriesDocument(document: Document): Pair<Document, String> {
+        val requestPath = document.location().toHttpUrl().encodedPath
         if (!requestPath.contains("/view_uploads/")) {
             return document to requestPath
         }
@@ -330,7 +302,7 @@ abstract class Zonatmo : HttpSource() {
             ?.takeIf { it.startsWith("http") }
             ?: throw Exception("Serie no encontrada desde el capítulo")
 
-        val seriesDocument = client.newCall(GET(seriesUrl, headers)).execute().use { it.asJsoup() }
+        val seriesDocument = client.get(seriesUrl).asJsoup()
         return seriesDocument to seriesUrl.removePrefix(baseUrl)
     }
 
