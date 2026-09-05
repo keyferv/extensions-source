@@ -2,28 +2,33 @@ package eu.kanade.tachiyomi.extension.es.onfmangas
 
 import android.webkit.CookieManager
 import app.cash.quickjs.QuickJs
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.head
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.tryParseDateTime
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Cookie
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import rx.Observable
-import java.text.SimpleDateFormat
+import org.jsoup.nodes.Document
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 private const val ONF_USER_AGENT =
@@ -32,18 +37,17 @@ private const val ONF_SEC_CH_UA =
     "\"Android WebView\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\""
 
 @Source
-abstract class OnfMangas : HttpSource() {
+abstract class OnfMangas : KeiSource() {
 
     override val supportsLatest = true
 
     // Clean client without CloudflareInterceptor that interferes with Turnstile challenges
-    override val client = OkHttpClient.Builder()
-        .cookieJar(super.client.cookieJar)
-        .followRedirects(true)
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .addInterceptor(::onfTokenInterceptor)
-        .build()
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        interceptors().removeAll { it.javaClass.simpleName == "CloudflareInterceptor" }
+        connectTimeout(30, TimeUnit.SECONDS)
+        readTimeout(30, TimeUnit.SECONDS)
+        addInterceptor(::onfTokenInterceptor)
+    }
 
     private object TurnstileAttempted
 
@@ -159,29 +163,30 @@ abstract class OnfMangas : HttpSource() {
     }
 
     // Mimic a standard desktop browser to bypass Cloudflare WAF 403s
-    override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", ONF_USER_AGENT)
-        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-        .set("Accept-Language", "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7")
-        .set("Sec-CH-UA", ONF_SEC_CH_UA)
-        .set("Sec-CH-UA-Mobile", "?1")
-        .set("Sec-CH-UA-Platform", "\"Android\"")
-        .set("Sec-Fetch-Site", "none")
-        .set("Sec-Fetch-Mode", "navigate")
-        .set("Sec-Fetch-Dest", "document")
-
-    private val dateFormat by lazy {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        set("User-Agent", ONF_USER_AGENT)
+        set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        set("Accept-Language", "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7")
+        set("Sec-CH-UA", ONF_SEC_CH_UA)
+        set("Sec-CH-UA-Mobile", "?1")
+        set("Sec-CH-UA-Platform", "\"Android\"")
+        set("Sec-Fetch-Site", "none")
+        set("Sec-Fetch-Mode", "navigate")
+        set("Sec-Fetch-Dest", "document")
     }
+
+    private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
+
+    private val utcZone = ZoneId.of("UTC")
 
     // ============================== Popular ===============================
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/populares.php", headers)
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val document = client.get("$baseUrl/populares.php").asJsoup()
+        return parsePopularMangasPage(document)
+    }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun parsePopularMangasPage(document: Document): MangasPage {
         val mangas = document.select("a.pop-podium-card, a.pop-card").mapNotNull { element ->
             SManga.create().apply {
                 title = element.selectFirst(".pop-podium-name, .pop-name")?.text()
@@ -200,10 +205,12 @@ abstract class OnfMangas : HttpSource() {
 
     // =============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/mangas.php?tab=general&genero=0&q=&page=$page", headers)
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val document = client.get("$baseUrl/mangas.php?tab=general&genero=0&q=&page=$page").asJsoup()
+        return parseLatestMangasPage(document)
+    }
 
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun parseLatestMangasPage(document: Document): MangasPage {
         val mangas = document.select(".manga-grid .manga-card").mapNotNull { element ->
             SManga.create().apply {
                 title = element.selectFirst(".manga-title")?.text()
@@ -221,7 +228,7 @@ abstract class OnfMangas : HttpSource() {
 
     // =============================== Search ===============================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$baseUrl/mangas.php".toHttpUrl().newBuilder()
             .addQueryParameter("q", query)
             .addQueryParameter("page", page.toString())
@@ -237,42 +244,64 @@ abstract class OnfMangas : HttpSource() {
             url.addQueryParameter("generos[0]", genero)
         }
 
-        return GET(url.build(), headers)
+        val document = client.get(url.build()).asJsoup()
+        return parseLatestMangasPage(document)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? = null
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         TabFilter(),
         GenreFilter(),
     )
 
     // =========================== Manga Details ============================
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst(".manga-title")?.text()
-                ?.takeIf { it.isNotEmpty() }
-                ?: throw Exception("Could not parse manga title")
-            author = document.selectFirst(".author-link")?.text()
-            description = document.selectFirst(".manga-description")?.text()
-            genre = document.select(".genre-tag").joinToString { it.text() }
-            thumbnail_url = document.selectFirst(".manga-poster")?.attr("abs:src")
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(baseUrl + manga.url).asJsoup()
 
-            val statusText = document.select(".manga-meta span").last()?.text()
-            status = when {
-                statusText?.contains("EMISIÓN", true) == true -> SManga.ONGOING
-                statusText?.contains("FINALIZADO", true) == true -> SManga.COMPLETED
-                else -> SManga.UNKNOWN
+        val updatedManga = if (fetchDetails) {
+            parseMangaDetails(document).apply {
+                url = manga.url
             }
+        } else {
+            manga
+        }
+
+        val updatedChapters = if (fetchChapters) {
+            parseChapterList(document)
+        } else {
+            chapters
+        }
+
+        return SMangaUpdate(updatedManga, updatedChapters)
+    }
+
+    private fun parseMangaDetails(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst(".manga-title")?.text()
+            ?.takeIf { it.isNotEmpty() }
+            ?: throw Exception("Could not parse manga title")
+        author = document.selectFirst(".author-link")?.text()
+        description = document.selectFirst(".manga-description")?.text()
+        genre = document.select(".genre-tag").joinToString { it.text() }
+        thumbnail_url = document.selectFirst(".manga-poster")?.attr("abs:src")
+
+        val statusText = document.select(".manga-meta span").last()?.text()
+        status = when {
+            statusText?.contains("EMISIÓN", true) == true -> SManga.ONGOING
+            statusText?.contains("FINALIZADO", true) == true -> SManga.COMPLETED
+            else -> SManga.UNKNOWN
         }
     }
 
     // ============================== Chapters ==============================
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+    private fun parseChapterList(document: Document): List<SChapter> {
         val hexString = document.selectFirst("script:containsData(const _hex =)")
             ?.data()
             ?.substringAfter("const _hex = \"")
@@ -292,7 +321,7 @@ abstract class OnfMangas : HttpSource() {
 
         for (dto in sortedChapters) {
             val parentChapter = dto.toSChapter().apply {
-                date_upload = dateFormat.tryParse(dto.date)
+                date_upload = dateFormat.tryParseDateTime(dto.date, utcZone)
             }
             chapters.add(parentChapter)
 
@@ -309,8 +338,8 @@ abstract class OnfMangas : HttpSource() {
 
     // =============================== Pages ================================
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(baseUrl + chapter.url).asJsoup()
         val hexString = document.selectFirst("script:containsData(const _hexP =)")
             ?.data()
             ?.substringAfter("const _hexP = \"")
@@ -332,25 +361,20 @@ abstract class OnfMangas : HttpSource() {
             .build()
     }
 
-    override fun fetchImageUrl(page: Page): Observable<String> {
+    override suspend fun getImageUrl(page: Page): String {
         val src = page.url
         val fallback = page.url.toHttpUrl().fragment?.removePrefix("fallback=")
 
-        if (fallback.isNullOrBlank()) return Observable.just(src)
+        if (fallback.isNullOrBlank()) return src
 
-        return Observable.fromCallable {
-            try {
-                val response = probeClient.newCall(Request.Builder().head().url(src).build()).execute()
-                val success = response.isSuccessful
-                response.close()
-                if (success) src else fallback
-            } catch (_: Exception) {
-                fallback
+        return try {
+            probeClient.head(src, ensureSuccess = false).use { response ->
+                if (response.isSuccessful) src else fallback
             }
+        } catch (_: Exception) {
+            fallback
         }
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     // ============================= Utilities ==============================
 
