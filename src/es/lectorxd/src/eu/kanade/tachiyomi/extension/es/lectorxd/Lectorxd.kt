@@ -6,10 +6,10 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
 import kotlinx.serialization.Serializable
@@ -200,12 +200,19 @@ abstract class Lectorxd : KeiSource() {
             onPageFinished {
                 evaluateJs(
                     """
-					(function () {
-						const urls = Array.from(document.querySelectorAll('#reader-content img[data-src], #reader-content img[data-original-src]'))
-							.map(image => image.dataset.src || image.dataset.originalSrc)
-							.filter(Boolean);
-						window.$bridgeName.post(JSON.stringify(urls));
-					})();
+                    (function () {
+                        const urls = Array.from(document.querySelectorAll('#reader-content img'))
+                            .map(image => image.dataset.src || image.dataset.originalSrc || image.getAttribute('src'))
+                            .map(url => {
+                                try {
+                                    return url ? new URL(url, document.baseURI).href : null;
+                                } catch (_) {
+                                    return null;
+                                }
+                            })
+                            .filter(url => url && (url.startsWith('http://') || url.startsWith('https://')));
+                        window.$bridgeName.post(JSON.stringify(urls));
+                    })();
                     """.trimIndent(),
                 )
             }
