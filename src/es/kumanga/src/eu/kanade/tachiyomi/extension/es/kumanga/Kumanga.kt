@@ -6,10 +6,11 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
 import kotlinx.serialization.json.JsonElement
@@ -39,10 +40,10 @@ abstract class Kumanga : KeiSource() {
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val trimmed = query.trim()
-        val genrePart = filters.filterIsInstance<GenreFilter>().firstOrNull()?.toUriPart().orEmpty()
-        val typePart = filters.filterIsInstance<TypeFilter>().firstOrNull()?.toUriPart().orEmpty()
-        val yearPart = filters.filterIsInstance<YearFilter>().firstOrNull()?.toUriPart().orEmpty()
-        val statusPart = filters.filterIsInstance<StatusFilter>().firstOrNull()?.toUriPart().orEmpty()
+        val genrePart = filters.firstInstanceOrNull<GenreFilter>()?.toUriPart().orEmpty()
+        val typePart = filters.firstInstanceOrNull<TypeFilter>()?.toUriPart().orEmpty()
+        val yearPart = filters.firstInstanceOrNull<YearFilter>()?.toUriPart().orEmpty()
+        val statusPart = filters.firstInstanceOrNull<StatusFilter>()?.toUriPart().orEmpty()
 
         val builder = "$baseUrl/mangalist".toHttpUrl().newBuilder()
         if (trimmed.isNotEmpty()) {
