@@ -8,10 +8,12 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import kotlinx.serialization.json.JsonElement
+import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
@@ -312,12 +314,26 @@ abstract class Rncalation : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(baseUrl + chapter.url).asJsoup()
-        return document.select("img.page-img, .page-wrap img").mapIndexed { index, element ->
-            val imageUrl = element.attr("abs:data-src").ifEmpty { element.attr("abs:src") }
-            Page(index, imageUrl = imageUrl)
+        var document = client.get(baseUrl + chapter.url).asJsoup()
+        document.selectFirst("form#rkf")?.let { form ->
+            val body = FormBody.Builder().apply {
+                form.select("input[name]").forEach { add(it.attr("name"), it.attr("value")) }
+            }.build()
+            document = client.post(form.absUrl("action"), body).asJsoup()
         }
+        return parsePageList(document)
     }
+
+    private fun parsePageList(document: Document): List<Page> = document.select(".rk-reader-content img.page-img, .rk-reader-content .page-wrap img")
+        .mapNotNull { element ->
+            sequenceOf(
+                element.attr("abs:src"),
+                element.attr("abs:data-src"),
+                element.attr("abs:data-fb-local"),
+                element.attr("abs:data-fallback"),
+            ).firstOrNull { it.isNotBlank() }
+        }
+        .mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
 
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         SortFilter(),
