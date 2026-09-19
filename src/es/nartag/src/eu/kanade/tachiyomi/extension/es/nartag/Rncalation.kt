@@ -8,22 +8,33 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
-import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.runWebView
 import kotlinx.serialization.json.JsonElement
-import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Response
 import org.jsoup.nodes.Document
+import java.io.InterruptedIOException
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Rncalation : KeiSource() {
 
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(2, 1.seconds)
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder {
+        val host = baseUrl.toHttpUrl().host
+        // Retry interceptor first: retries via chain.proceed do not restart earlier
+        // interceptors, so every retry must re-enter the rate-limit path below.
+        return addInterceptor(RateLimitRetryInterceptor(host))
+            .rateLimit(1, 1.seconds, 1.seconds) { it.host == host }
+    }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val document = client.get("$baseUrl/library?sort=views&page=$page").asJsoup()
@@ -314,26 +325,34 @@ abstract class Rncalation : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        var document = client.get(baseUrl + chapter.url).asJsoup()
-        document.selectFirst("form#rkf")?.let { form ->
-            val body = FormBody.Builder().apply {
-                form.select("input[name]").forEach { add(it.attr("name"), it.attr("value")) }
-            }.build()
-            document = client.post(form.absUrl("action"), body).asJsoup()
-        }
-        return parsePageList(document)
+        val chapterUrl = baseUrl + chapter.url.substringBefore("#")
+        val imageUrls = runCatching {
+            runWebView<List<String>>(timeout = 60.seconds) {
+                poll {
+                    evaluateJs(
+                        """
+                        (function() {
+                            return Array.from(document.querySelectorAll('main img[alt^="Página"], main img.page-img'))
+                                .map(function(image) {
+                                    var value = image.getAttribute('data-src') || image.getAttribute('data-fb-local') || image.getAttribute('data-fallback') || image.getAttribute('src');
+                                    if (!value) return '';
+                                    value = value.trim();
+                                    if (!value || value.startsWith('data:') || value.startsWith('blob:')) return '';
+                                    try { return new URL(value, document.baseURI).href; } catch (e) { return ''; }
+                                })
+                                .filter(function(url) { return !!url; });
+                        })()
+                        """.trimIndent(),
+                    ) { result ->
+                        val urls = result.parseAs<List<String>>().distinct()
+                        if (urls.isNotEmpty()) resolve(urls)
+                    }
+                }
+                loadUrl(chapterUrl)
+            }
+        }.getOrDefault(emptyList())
+        return imageUrls.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
     }
-
-    private fun parsePageList(document: Document): List<Page> = document.select(".rk-reader-content img.page-img, .rk-reader-content .page-wrap img")
-        .mapNotNull { element ->
-            sequenceOf(
-                element.attr("abs:src"),
-                element.attr("abs:data-src"),
-                element.attr("abs:data-fb-local"),
-                element.attr("abs:data-fallback"),
-            ).firstOrNull { it.isNotBlank() }
-        }
-        .mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
 
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         SortFilter(),
@@ -341,4 +360,65 @@ abstract class Rncalation : KeiSource() {
         StatusFilter(),
         GenreFilter(genresList),
     )
+}
+
+private class RateLimitRetryInterceptor(private val host: String) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        if (request.method != "GET" || request.url.host != host) {
+            return chain.proceed(request)
+        }
+
+        var response = chain.proceed(request)
+        var attempt = 0
+        while (isRateLimited(response) && attempt < MAX_RETRIES) {
+            val delayMs = resolveDelayMs(response, attempt)
+            response.close()
+            if (chain.call().isCanceled()) {
+                throw InterruptedIOException("Canceled")
+            }
+            try {
+                Thread.sleep(delayMs)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw InterruptedIOException("Interrupted")
+            }
+            if (chain.call().isCanceled()) {
+                throw InterruptedIOException("Canceled")
+            }
+            response = chain.proceed(request)
+            attempt++
+        }
+        return response
+    }
+
+    private fun isRateLimited(response: Response): Boolean {
+        if (response.code == 429) return true
+        return runCatching {
+            response.peekBody(PEEK_BYTES).use { it.string().contains(RATE_LIMIT_SIGNAL) }
+        }.getOrDefault(false)
+    }
+
+    private fun resolveDelayMs(response: Response, attempt: Int): Long {
+        val fallback = FALLBACK_DELAYS[attempt]
+        val raw = response.header("Retry-After")?.trim().takeUnless { it.isNullOrEmpty() } ?: return fallback
+        raw.toLongOrNull()?.let {
+            val seconds = it.coerceAtLeast(0L)
+            return if (seconds > Long.MAX_VALUE / 1000L) Long.MAX_VALUE else seconds * 1000L
+        }
+        return runCatching {
+            val format = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("GMT")
+            }
+            val parsed = format.parse(raw)?.time ?: return fallback
+            (parsed - System.currentTimeMillis()).coerceAtLeast(0L)
+        }.getOrDefault(fallback)
+    }
+
+    private companion object {
+        const val MAX_RETRIES = 3
+        const val PEEK_BYTES = 32 * 1024L
+        const val RATE_LIMIT_SIGNAL = "Demasiadas solicitudes"
+        val FALLBACK_DELAYS = longArrayOf(2000L, 5000L, 10000L)
+    }
 }
