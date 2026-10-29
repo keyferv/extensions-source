@@ -9,71 +9,83 @@ import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.network.post
+import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParseDate
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
 import okhttp3.FormBody
-import okhttp3.HttpUrl
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Response
-import org.jsoup.Jsoup
+import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.time.format.DateTimeFormatter
+import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class PlotTwistNoFansub : KeiSource() {
 
-    // ============================== Popular ===============================
-
-    override suspend fun getPopularManga(page: Int) = getMangaList(page, "", "trending")
-
-    // =============================== Latest ===============================
-
-    override suspend fun getLatestUpdates(page: Int) = getMangaList(page, "", "latest3")
-
-    // =============================== Search ===============================
-
-    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.pathSegments.count(String::isNotBlank) < 2) return null
-        return fetchMangaUpdate(
-            SManga.create().apply { this.url = url.encodedPath },
-            emptyList(),
-            true,
-            false,
-        ).manga
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        set("Referer", "$baseUrl/")
     }
 
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList) = getMangaList(page, query)
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        rateLimit(2, 1.seconds)
+        addInterceptor { chain ->
+            val request = chain.request()
+            val url = request.url.toString()
+            val isImage = url.contains("/wp-content/") ||
+                url.contains("uploads") ||
+                url.endsWith(".jpg", true) ||
+                url.endsWith(".jpeg", true) ||
+                url.endsWith(".png", true) ||
+                url.endsWith(".webp", true) ||
+                url.endsWith(".avif", true)
+            if (isImage) {
+                val newRequest = request.newBuilder()
+                    .removeHeader("Accept-Encoding")
+                    .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                    .build()
+                chain.proceed(newRequest)
+            } else {
+                chain.proceed(request)
+            }
+        }
+    }
 
-    // ============================= MangasPage =============================
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList()
 
-    private suspend fun getMangaList(page: Int, query: String, sort: String = "views3") = mangaListParse(
-        client.get(
-            baseUrl.toHttpUrl().newBuilder().apply {
-                if (query.isNotEmpty()) {
-                    if (page > 1) addPathSegment("page").addPathSegment(page.toString())
-                    addQueryParameter("s", query)
-                    addQueryParameter("post_type", "wp-manga")
-                } else {
-                    addPathSegment("biblioteca3")
-                    if (page > 1) addPathSegment("page").addPathSegment(page.toString())
-                    addPathSegment("")
+    // ============================== Popular ===============================
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
+            addPathSegment("biblioteca3")
+            if (page > 1) {
+                addPathSegment("page")
+                addPathSegment(page.toString())
+            }
+            addQueryParameter("m_orderby", "trending")
+        }.build()
+        val document = client.get(url).asJsoup()
+        return parseMangasPage(document)
+    }
 
-                    addQueryParameter("m_orderby", sort)
-                }
-            }.build(),
-        ),
-    )
+    // =============================== Latest ===============================
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
+            addPathSegment("biblioteca3")
+            if (page > 1) {
+                addPathSegment("page")
+                addPathSegment(page.toString())
+            }
+        }.build()
+        val document = client.get(url).asJsoup()
+        return parseMangasPage(document)
+    }
 
-    private fun mangaListParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-
+    private fun parseMangasPage(document: Document): MangasPage {
         val mangas = document.select("div.manga-grid-v2 figure").map { element ->
             SManga.create().apply {
                 val a = element.selectFirst("a[href]")!!
@@ -84,31 +96,61 @@ abstract class PlotTwistNoFansub : KeiSource() {
                 thumbnail_url = element.selectFirst("img")?.imgAttr()
             }
         }
-
         val hasNextPage = document.selectFirst("a.next.page-numbers, a.next, a:contains(Siguiente)") != null
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ========================= Manga Update =========================
-    override val supportRelatedMangasBySearch = true
+    // =============================== Search ===============================
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = baseUrl.toHttpUrl().newBuilder()
 
+        if (query.isNotEmpty()) {
+            if (page > 1) {
+                url.addPathSegment("page")
+                url.addPathSegment(page.toString())
+            }
+            url.addQueryParameter("s", query)
+            url.addQueryParameter("post_type", "wp-manga")
+        } else {
+            url.addPathSegment("biblioteca3")
+            if (page > 1) {
+                url.addPathSegment("page")
+                url.addPathSegment(page.toString())
+            }
+            url.addQueryParameter("m_orderby", "views3")
+        }
+
+        val document = client.get(url.build()).asJsoup()
+        return parseMangasPage(document)
+    }
+
+    // =========================== Manga Details ============================
     override suspend fun fetchMangaUpdate(
         manga: SManga,
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val doc = client.get(getMangaUrl(manga)).asJsoup()
-        return SMangaUpdate(
-            parseDetails(doc),
-            if (fetchChapters) parseChapters(doc) else chapters,
-        )
+        val document = client.get(baseUrl + manga.url).asJsoup()
+
+        val updatedManga = if (fetchDetails) {
+            parseMangaDetails(document).apply {
+                url = manga.url
+            }
+        } else {
+            manga
+        }
+
+        val updatedChapters = if (fetchChapters) {
+            parseChapterList(document)
+        } else {
+            chapters
+        }
+
+        return SMangaUpdate(updatedManga, updatedChapters)
     }
 
-    // =========================== Details ============================
-
-    private fun parseDetails(document: Document) = SManga.create().apply {
-        setUrlWithoutDomain(document.location())
+    private fun parseMangaDetails(document: Document): SManga = SManga.create().apply {
         title = document.selectFirst("h1.mn-detail-title")?.text()
             ?: document.selectFirst(".post-title h1")?.text()
             ?: throw Exception("Manga title not found")
@@ -139,7 +181,7 @@ abstract class PlotTwistNoFansub : KeiSource() {
     }
 
     // ============================== Chapters ==============================
-    private suspend fun parseChapters(document: Document): List<SChapter> {
+    private suspend fun parseChapterList(document: Document): List<SChapter> {
         val mangaId = document.selectFirst("#mn-detail-load-more")?.attr("data-manga")
             ?: document.selectFirst("script:containsData(mnWpMangaId)")
                 ?.data()
@@ -168,7 +210,7 @@ abstract class PlotTwistNoFansub : KeiSource() {
                         append("Capítulo $num")
                         if (extend.isNotEmpty()) append(" - $extend")
                     }
-                    date_upload = dateFormat.tryParseDate(dateText)
+                    date_upload = dateFormat.tryParse(dateText)
                 },
             )
         }
@@ -180,37 +222,49 @@ abstract class PlotTwistNoFansub : KeiSource() {
         // The API page numbering starts at 1 and mirrors what the HTML already shows —
         // seenUrls deduplication ensures we never add the same chapter twice.
         var page = 1
-        val totalChapters = document.selectFirst(
-            ".mn-detail-stat:has(.chapters) .mn-detail-stat-value",
-        )?.text()?.toIntOrNull() ?: 0
+        var hasNextPage = true
 
-        val pages = (totalChapters - chapters.size + CHAPTER_CHUNK - 1) / CHAPTER_CHUNK
+        while (hasNextPage) {
+            val form = FormBody.Builder()
+                .add("action", "plot_load_chapters")
+                .add("manga_id", mangaId)
+                .add("page", page.toString())
+                .build()
 
-        coroutineScope {
-            (1..pages).map { page ->
-                async {
-                    val form = FormBody.Builder()
-                        .add("action", "plot_load_chapters")
-                        .add("manga_id", mangaId)
-                        .add("page", page.toString())
-                        .build()
+            val apiData = try {
+                client.post("$baseUrl/wp-admin/admin-ajax.php", body = form).parseAs<ChapterAjaxResponse>()
+            } catch (_: Exception) {
+                break
+            }
 
-                    runCatching {
-                        client.post("$baseUrl/wp-admin/admin-ajax.php", form)
-                            .parseAs<ChapterAjaxResponse>()
-                            .let { Jsoup.parseBodyFragment(it.data.html, baseUrl) }
-                            .select("a.mn-detail-chapter-item")
-                    }.getOrDefault(emptyList())
-                }
-            }.awaitAll().flatten()
-        }.forEach { parseChapterElement(it) }
+            if (apiData.data.html.isEmpty()) {
+                // Empty HTML — no more chapters.
+                break
+            }
+
+            val fragment = org.jsoup.Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
+            val newChapters = fragment.body().select("a.mn-detail-chapter-item")
+
+            if (newChapters.isEmpty()) {
+                // HTML came back but contained no chapter links — we're done.
+                break
+            }
+
+            newChapters.forEach { parseChapterElement(it) }
+
+            // Trust the server's has_more signal to decide whether to fetch the next page.
+            // The html.isEmpty() and newChapters.isEmpty() guards above already handle
+            // the case where the server is wrong, so we don't need extra logic here.
+            hasNextPage = apiData.data.hasMore
+            page++
+        }
 
         return chapters
     }
 
     // =============================== Pages ================================
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(getChapterUrl(chapter)).asJsoup()
+        val document = client.get(baseUrl + chapter.url).asJsoup()
         return (
             document.select("div.reading-content img").ifEmpty {
                 document.select("img.wp-manga-chapter-img")
@@ -237,11 +291,13 @@ abstract class PlotTwistNoFansub : KeiSource() {
         return url.trim()
     }
 
+    private val dateFormat by lazy {
+        SimpleDateFormat("MMMM d, yyyy", Locale("es"))
+    }
+
     companion object {
-        private val CHAPTER_CHUNK = 20
         private val MANGA_ID_REGEX = Regex("""mnWpMangaId\s*=\s*(\d+)""")
         private val OLD_MANGA_ID_REGEX = Regex(""""manga_id"\s*:\s*"(\d+)"""")
         private val HTML_TAG_REGEX = Regex("<[^>]*>")
-        private val dateFormat = DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.forLanguageTag("es"))
     }
 }

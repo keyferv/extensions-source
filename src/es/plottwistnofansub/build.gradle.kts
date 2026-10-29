@@ -6,16 +6,12 @@ plugins {
 
 keiyoushi {
     name = "Plot Twist No Fansub"
-    versionCode = 0
+    versionCode = 16
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
     source {
         lang = "es"
         baseUrl = "https://plotnofansub.com"
-    }
-
-    deeplink {
-        path("/manga/..*")
     }
 }
