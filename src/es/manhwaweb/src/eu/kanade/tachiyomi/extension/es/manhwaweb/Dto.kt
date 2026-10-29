@@ -84,8 +84,7 @@ class ComicDetailsDto(
     @SerialName("_name") private val alternativeName: String? = null,
     @SerialName("_imagen") private val thumbnail: String,
     @SerialName("_categoris") private val genres: List<Map<Int, String>>,
-    @SerialName("autor") private val authors: List<CreatorDto>,
-    @SerialName("artista") private val artists: List<CreatorDto>,
+    @SerialName("_extras") private val extras: ComicDetailsExtrasDto? = null,
     val chapters: List<ChapterDto>,
 ) {
     fun toSManga() = SManga.create().apply {
@@ -99,8 +98,8 @@ class ComicDetailsDto(
         }
         status = parseStatus(this@ComicDetailsDto.status)
         genre = genres.joinToString { it.values.first() }
-        author = authors.joinToString { it.name }.ifEmpty { null }
-        artist = artists.joinToString { it.name }.ifEmpty { null }
+        val authors = extras?.authors.orEmpty()
+        if (authors.isNotEmpty()) author = authors.joinToString()
         initialized = true
     }
 
@@ -112,21 +111,29 @@ class ComicDetailsDto(
 }
 
 @Serializable
-class CreatorDto(
-    val name: String,
+class ComicDetailsExtrasDto(
+    @SerialName("autores") val authors: List<String> = emptyList(),
 )
 
 @Serializable
 class ChapterDto(
     @SerialName("chapter") val number: Float,
-    val versions: List<ChapterVersionDto>,
+    @SerialName("link") val espUrl: String? = null,
+    @SerialName("link_raw") val rawUrl: String? = null,
+    @SerialName("create") val createdAt: Long? = null,
+    val versions: List<ChapterVersionDto> = emptyList(),
 )
 
 @Serializable
 class ChapterVersionDto(
-    val link: String,
-    val joint: List<CreatorDto> = emptyList(),
-    val create: Long? = null,
+    val link: String? = null,
+    @SerialName("create") val createdAt: Long? = null,
+    val joint: List<ChapterJointDto> = emptyList(),
+)
+
+@Serializable
+class ChapterJointDto(
+    val name: String? = null,
 )
 
 @Serializable

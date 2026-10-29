@@ -107,22 +107,32 @@ abstract class ManhwaWeb : KeiSource() {
     private suspend fun getDetailsBySlug(slug: String) = client.get("$apiUrl/manhwa/see/$slug").parseAs<ComicDetailsDto>()
 
     private fun parseChapterList(comic: ComicDetailsDto) = comic.chapters
-        .flatMap { chapter -> chapter.versions.mapNotNull { it.toSChapter(chapter.number, comic.id, comic.slug) } }
+        .flatMap { it.toSChapters(comic.id, comic.slug) }
         .sortedByDescending { it.chapter_number }
 
-    private fun ChapterVersionDto.toSChapter(number: Float, id: String, realId: String): SChapter? {
-        // Unreleased chapters have no date
-        val date = create ?: return null
-
-        return SChapter.create().apply {
-            name = "Capítulo ${number.toString().removeSuffix(".0")}"
-            chapter_number = number
-            date_upload = date
-            setUrlWithoutDomain(link.replace(id, realId))
-            scanlator = if (joint.isEmpty()) {
-                "ManhwaWeb Bot"
-            } else {
-                joint.map { it.name.trim() }.filter { it.isNotEmpty() }.joinToString().ifEmpty { null }
+    private fun ChapterDto.toSChapters(id: String, realId: String): List<SChapter> {
+        if (espUrl != null || rawUrl != null) {
+            if (createdAt == null) return emptyList()
+            return listOf(
+                SChapter.create().apply {
+                    name = "Capítulo ${number.toString().removeSuffix(".0")}"
+                    chapter_number = number
+                    date_upload = createdAt
+                    val url = (espUrl ?: rawUrl!!).replace(id, realId)
+                    setUrlWithoutDomain(url)
+                    scanlator = if (espUrl != null) "Esp" else "Raw"
+                },
+            )
+        }
+        return versions.mapNotNull { version ->
+            val link = version.link ?: return@mapNotNull null
+            SChapter.create().apply {
+                name = "Capítulo ${number.toString().removeSuffix(".0")}"
+                chapter_number = number
+                date_upload = version.createdAt ?: 0
+                setUrlWithoutDomain(link.replace(id, realId))
+                val uploaders = version.joint.mapNotNull { it.name }
+                if (uploaders.isNotEmpty()) scanlator = uploaders.joinToString()
             }
         }
     }
