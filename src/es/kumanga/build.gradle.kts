@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Kumanga"
-    versionCode = 0
+    versionCode = 27
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 

@@ -7,7 +7,7 @@ plugins {
 keiyoushi {
     name = "UnderTranslations"
     theme = "mangathemesia"
-    versionCode = 0
+    versionCode = 4
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 

@@ -50,10 +50,6 @@
       "note": "Local custom source backed by Firestore and Google Drive"
     },
     {
-      "path": "src/es/undertranslations",
-      "note": "Local custom source for undertranslations.com"
-    },
-    {
       "path": "src/es/mangatab",
       "note": "Local custom source added in this fork"
     },
@@ -104,10 +100,6 @@
     {
       "path": "src/es/spnmanga",
       "note": "Local custom source for spnmanga.com"
-    },
-    {
-      "path": "src/es/kumanga",
-      "note": "Local custom source"
     },
     {
       "path": "src/es/leercapitulo",
