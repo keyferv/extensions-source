@@ -23,6 +23,8 @@ abstract class MHScans : Madara() {
 
     override val chapterDateFormat = DateTimeFormatter.ofPattern("dd 'de' MMMM 'de' yyyy", Locale.forLanguageTag("es"))
 
+    override val mangaSubString = "series"
+
     override fun OkHttpClient.Builder.configureClient() = rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
 
     override val chapterMode = ChapterMode.MangaAjax
