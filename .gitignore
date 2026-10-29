@@ -12,3 +12,7 @@ gen
 generated-src/
 .kotlin
 *.jks
+.atl/
+.codegraph/
+.playwright-mcp/
+.zvec-grep/
