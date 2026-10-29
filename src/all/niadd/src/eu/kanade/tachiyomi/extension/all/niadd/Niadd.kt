@@ -10,27 +10,29 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
-import keiyoushi.utils.tryParseDate
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
-import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.time.format.DateTimeFormatter
+import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
 abstract class Niadd : KeiSource() {
 
-    // Causes pageList 302
-    override fun Headers.Builder.configureHeaders() = removeAll("Referer")
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        add("Referer", "$baseUrl/")
+    }
+
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = this
+
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList()
 
     // Popular
-    override suspend fun getPopularManga(page: Int): MangasPage = parseMangaList(client.get("$baseUrl/list/Hot-Manga.html").asJsoup())
-
     private fun popularMangaSelector() = "div.manga-item"
 
     private fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
@@ -40,57 +42,64 @@ abstract class Niadd : KeiSource() {
         element.selectFirst("div.manga-img img")?.attr("abs:src")?.also { thumbnail_url = it }
     }
 
-    private fun parseMangaList(document: Document): MangasPage {
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val document = client.get("$baseUrl/list/Hot-Manga.html").asJsoup()
         val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
         return MangasPage(mangas, false)
     }
 
     // Search
-    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.pathSegments.size < 2) return null
-
-        return fetchMangaUpdate(
-            SManga.create().apply { this.url = url.encodedPath },
-            emptyList(),
-            true,
-            false,
-        ).manga
-    }
-
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$baseUrl/search/".toHttpUrl().newBuilder()
             .addQueryParameter("name", query)
             .build()
-        return parseMangaList(client.get(url).asJsoup())
+        val document = client.get(url).asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        return MangasPage(mangas, false)
     }
 
     // Latest
-    override suspend fun getLatestUpdates(page: Int): MangasPage = parseMangaList(client.get("$baseUrl/list/New-Update.html").asJsoup())
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val document = client.get("$baseUrl/list/New-Update.html").asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        return MangasPage(mangas, false)
+    }
 
+    // Details + Chapters unified
     override suspend fun fetchMangaUpdate(
         manga: SManga,
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
-    ): SMangaUpdate = coroutineScope {
-        val details = async { if (fetchDetails) fetchDetails(manga) else manga }
-        val chapterList = async { if (fetchChapters) fetchChapterList(manga) else chapters }
+    ): SMangaUpdate {
+        var updatedManga = manga
+        var updatedChapters = chapters
 
-        SMangaUpdate(details.await(), chapterList.await())
+        if (fetchDetails) {
+            val document = client.get(getMangaUrl(manga)).asJsoup()
+            updatedManga = parseMangaDetails(document)
+            updatedManga.url = manga.url
+        }
+
+        if (fetchChapters) {
+            val chaptersUrl = baseUrl + manga.url.removeSuffix(".html") + "/chapters.html"
+            val document = client.get(chaptersUrl).asJsoup()
+            document.selectFirst("ul.chapter-list")!!
+            updatedChapters = document.select(chapterListSelector).map { chapterFromElement(it) }
+        }
+
+        return SMangaUpdate(updatedManga, updatedChapters)
     }
 
-    // Details
-    private suspend fun fetchDetails(manga: SManga): SManga = SManga.create().apply {
-        val document = client.get(getMangaUrl(manga)).asJsoup()
+    private fun parseMangaDetails(document: Document): SManga = SManga.create().apply {
         val infoElement = document.select("div.bookside-general, div.detail-general")
 
-        url = manga.url
         title = document.selectFirst("h1, .book-headline-name")!!.text()
         author = infoElement.select(".detail-general-cell:contains(Autor) span, [itemprop=author] span").text()
-            .replace("Autor (es):", "", ignoreCase = true)
+            .replace("Autor (es):", "", ignoreCase = true).ifBlank { null }
         artist = infoElement.select(".detail-general-cell:contains(Artista) span").text()
-            .replace("Artista:", "", ignoreCase = true)
-        genre = document.select("[itemprop=genre]").eachText().joinToString()
+            .replace("Artista:", "", ignoreCase = true).ifBlank { null }
+        genre = document.select("[itemprop=genre]").eachText().joinToString().ifBlank { null }
 
         val yearKeywords = listOf(
             "Released:",
@@ -108,7 +117,7 @@ abstract class Niadd : KeiSource() {
         val yearClean = yearRaw
             .let { text ->
                 yearKeywords.fold(text) { acc, keyword -> acc.replace(keyword, "", ignoreCase = true) }
-            }
+            }.trim()
 
         val synopsisKeywords = listOf(
             "Synopsis",
@@ -138,7 +147,7 @@ abstract class Niadd : KeiSource() {
         description = buildString {
             if (yearClean.isNotEmpty()) append("Ano: $yearClean\n\n")
             if (synopsisText.isNotEmpty()) append(synopsisText)
-        }
+        }.ifBlank { null }
 
         document.selectFirst("div.detail-img img, div.bookside-img img")?.attr("abs:src").also { thumbnail_url = it }
         status = SManga.ONGOING
@@ -147,58 +156,78 @@ abstract class Niadd : KeiSource() {
     // Chapters
     private val chapterListSelector = "ul.chapter-list a.hover-underline"
 
+    private val dateFormats = listOf(
+        SimpleDateFormat("MMM dd, yyyy", Locale.ENGLISH),
+        SimpleDateFormat("MMM d, yyyy", Locale.ENGLISH),
+        SimpleDateFormat("dd MMM yyyy", Locale.ENGLISH),
+        SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH),
+    )
+
     private fun parseDate(dateString: String): Long {
-        if (dateString.contains("atrás", ignoreCase = true) ||
-            dateString.contains("ago", ignoreCase = true)
+        val trimmed = dateString.trim()
+        if (trimmed.contains("atrás", ignoreCase = true) ||
+            trimmed.contains("ago", ignoreCase = true) ||
+            trimmed.contains("hace", ignoreCase = true)
         ) {
             return 0L
         }
 
-        return dateFormat.tryParseDate(dateString)
-    }
-
-    private suspend fun fetchChapterList(manga: SManga): List<SChapter> {
-        val chaptersUrl = baseUrl + manga.url.removeSuffix(".html") + "/chapters.html"
-        val document = client.get(chaptersUrl).asJsoup()
-        document.selectFirst("ul.chapter-list")!!
-
-        return document.select(chapterListSelector).map { chapterFromElement(it) }
+        for (format in dateFormats) {
+            format.tryParse(trimmed).takeIf { it > 0L }?.let { return it }
+        }
+        return 0L
     }
 
     private fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
         val rawUrl = element.attr("abs:href")
         setUrlWithoutDomain(rawUrl)
 
-        name = element.selectFirst("span.chp-title, span.chapter-name, span.name")?.text()
+        val rawName = element.selectFirst("span.chp-title, span.chapter-name")?.text()
             ?.takeIf(String::isNotEmpty)
             ?: element.text()
 
-        element.selectFirst("span.chp-time, span.chapter-time, span.time")?.text()
-            ?.also { date_upload = parseDate(it) }
+        val dateText = element.selectFirst("span.chp-time, span.chapter-time")?.text()
+        if (dateText != null && dateText.isNotEmpty()) {
+            date_upload = parseDate(dateText)
+        }
+
+        name = if (dateText != null) {
+            rawName.removeSuffix(dateText).trimEnd()
+        } else {
+            rawName.replace(DATE_IN_NAME_REGEX, "")
+        }
 
         chapter_number = CHAPTER_NUMBER_REGEX.find(name)
             ?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
     }
 
     // Pages
-    override suspend fun getPageList(chapter: SChapter): List<Page> = pageListParse(client.get(getChapterUrl(chapter)).asJsoup())
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val chapterUrl = getChapterUrl(chapter)
+        val document = client.get(chapterUrl).asJsoup()
+        return parsePageList(document)
+    }
 
-    private suspend fun pageListParse(document: Document): List<Page> {
+    private suspend fun parsePageList(document: Document): List<Page> {
+        val seenUrls = LinkedHashSet<String>()
         val pages = mutableListOf<Page>()
         val currentUrl = document.location()
         val html = document.html()
+
+        fun addPage(url: String, referrer: String = currentUrl) {
+            if (seenUrls.add(url)) {
+                pages.add(Page(pages.size, referrer, imageUrl = url))
+            }
+        }
 
         if (html.contains("all_imgs_url")) {
             val match = ALL_IMGS_URL_REGEX.find(html)
             if (match != null) {
                 val content = match.groupValues[1]
-                val urls = content.split(",")
+                content.split(",")
                     .map { it.replace(CLEAN_IMG_URL_REGEX, "") }
                     .filter { it.startsWith("http") }
-
-                urls.forEachIndexed { i, url ->
-                    pages.add(Page(i, currentUrl, imageUrl = url))
-                }
+                    .forEach { addPage(it) }
                 if (pages.isNotEmpty()) return pages
             }
         }
@@ -206,44 +235,121 @@ abstract class Niadd : KeiSource() {
         val sourceButton = document.selectFirst("a.cool-blue.vision-button")
         if (sourceButton != null) {
             val sourceUrl = sourceButton.attr("abs:href")
-            val requestHeaders = headers.newBuilder()
-                .set("Referer", currentUrl)
+            val requestHeaders = headersBuilder()
+                .add("Referer", currentUrl)
                 .build()
-
-            return pageListParse(client.get(sourceUrl, requestHeaders).asJsoup())
+            val nextDoc = client.get(sourceUrl, requestHeaders).asJsoup()
+            // Preserve recursion: delegate to same parsing with new document
+            return parsePageListWithBase(nextDoc, currentUrl, seenUrls, pages)
         }
 
-        // One image per sub page; resolve them lazily instead of fetching every sub page up front
-        val subPages = document.select("select.sl-page option")
-            .map { it.absUrl("value") }
-            .filter(String::isNotEmpty)
-        if (subPages.isNotEmpty()) {
-            return subPages.mapIndexed { i, url -> Page(i, url) }
-        }
-
-        document.select(PAGE_IMAGE_SELECTOR).forEach { img ->
+        document.select("div.pic_box img, div.reading-content img").forEach { img ->
             val url = img.attr("abs:src")
             if (url.isNotEmpty() && !url.contains("cover") && !url.contains("logo")) {
-                pages.add(Page(pages.size, currentUrl, imageUrl = url))
+                addPage(url)
+            }
+        }
+
+        val otherSubPages = document.select("select.sl-page option")
+            .map { it.attr("value") }
+            .filter { it.isNotEmpty() && !currentUrl.contains(it) }
+
+        if (otherSubPages.isNotEmpty()) {
+            otherSubPages.forEach { subPath ->
+                val subUrl = if (subPath.startsWith("http")) subPath else baseUrl + subPath
+                try {
+                    val subDoc = client.get(subUrl).asJsoup()
+                    subDoc.select("div.pic_box img, div.reading-content img").forEach { img ->
+                        val imgUrl = img.attr("abs:src")
+                        if (imgUrl.isNotEmpty() && !imgUrl.contains("cover")) {
+                            addPage(imgUrl, subUrl)
+                        }
+                    }
+                } catch (_: Exception) {}
             }
         }
 
         return pages
     }
 
-    override suspend fun getImageUrl(page: Page): String = client.get(page.url).asJsoup()
-        .selectFirst(PAGE_IMAGE_SELECTOR)!!
-        .attr("abs:src")
+    private suspend fun parsePageListWithBase(
+        document: Document,
+        originalUrl: String,
+        seenUrls: LinkedHashSet<String>,
+        pages: MutableList<Page>,
+    ): List<Page> {
+        val currentUrl = document.location()
+        val html = document.html()
 
-    override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
-        .header("Referer", page.url)
-        .build()
+        fun addPage(url: String, referrer: String = currentUrl) {
+            if (seenUrls.add(url)) {
+                pages.add(Page(pages.size, referrer, imageUrl = url))
+            }
+        }
+
+        if (html.contains("all_imgs_url")) {
+            val match = ALL_IMGS_URL_REGEX.find(html)
+            if (match != null) {
+                val content = match.groupValues[1]
+                content.split(",")
+                    .map { it.replace(CLEAN_IMG_URL_REGEX, "") }
+                    .filter { it.startsWith("http") }
+                    .forEach { addPage(it) }
+                if (pages.isNotEmpty()) return pages
+            }
+        }
+
+        // If redirected document still has sourceButton, follow once more
+        val sourceButton = document.selectFirst("a.cool-blue.vision-button")
+        if (sourceButton != null) {
+            val sourceUrl = sourceButton.attr("abs:href")
+            val requestHeaders = headersBuilder()
+                .add("Referer", currentUrl)
+                .build()
+            val nextDoc = client.get(sourceUrl, requestHeaders).asJsoup()
+            return parsePageListWithBase(nextDoc, originalUrl, seenUrls, pages)
+        }
+
+        document.select("div.pic_box img, div.reading-content img").forEach { img ->
+            val url = img.attr("abs:src")
+            if (url.isNotEmpty() && !url.contains("cover") && !url.contains("logo")) {
+                addPage(url)
+            }
+        }
+
+        val otherSubPages = document.select("select.sl-page option")
+            .map { it.attr("value") }
+            .filter { it.isNotEmpty() && !currentUrl.contains(it) }
+
+        if (otherSubPages.isNotEmpty()) {
+            otherSubPages.forEach { subPath ->
+                val subUrl = if (subPath.startsWith("http")) subPath else baseUrl + subPath
+                try {
+                    val subDoc = client.get(subUrl).asJsoup()
+                    subDoc.select("div.pic_box img, div.reading-content img").forEach { img ->
+                        val imgUrl = img.attr("abs:src")
+                        if (imgUrl.isNotEmpty() && !imgUrl.contains("cover")) {
+                            addPage(imgUrl, subUrl)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        return pages
+    }
+
+    override fun imageRequest(page: Page): Request {
+        val imgHeaders = headersBuilder()
+            .add("Referer", page.url)
+            .build()
+        return Request.Builder().url(page.imageUrl!!).headers(imgHeaders).build()
+    }
 
     companion object {
         private val ALL_IMGS_URL_REGEX = Regex("""all_imgs_url\s*:\s*\[([\s\S]*?)\]""")
         private val CLEAN_IMG_URL_REGEX = Regex("""["'\s]""")
-        private const val PAGE_IMAGE_SELECTOR = "div.pic_box img.manga_pic, div.reading-content img"
-        private val CHAPTER_NUMBER_REGEX = Regex("""Capítulo\s+(\d+(\.\d+)?)""")
-        private val dateFormat = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH)
+        private val CHAPTER_NUMBER_REGEX = Regex("""(?:Chapter|Chapters|Ch\.?|Cap[ií]tulo)\s*[.:]?\s*(\d+(?:\.\d+)?)\b""")
+        private val DATE_IN_NAME_REGEX = Regex("""\s+\w{3,9}\s+\d{1,2},?\s+\d{4}\s*$""")
     }
 }
