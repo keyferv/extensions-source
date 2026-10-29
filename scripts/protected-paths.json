@@ -102,10 +102,6 @@
       "note": "Local custom source for spnmanga.com"
     },
     {
-      "path": "src/es/leercapitulo",
-      "note": "Local custom source maintained for the current site template"
-    },
-    {
       "path": "src/es/manhwaweb",
       "note": "Local custom source with optional metadata and chapter-version protections"
     },
