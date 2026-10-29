@@ -17,6 +17,7 @@ import sys
 
 from github_utils import run_gh
 
+UPSTREAM_REPO = "keiyoushi/extensions-source"
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # At most PER_PAGE * MAX_PAGES runs are checked to find a good base commit.
 PER_PAGE = 100
@@ -78,6 +79,35 @@ def find_base_sha(repo: str, workflow: str, branch: str) -> str:
         seen_runs += len(runs)
         if len(runs) < PER_PAGE:
             break
+
+    # If this is a fork and no run on this branch was found:
+    # check upstream repository for the latest successful run reachable from HEAD
+    if repo.lower() != UPSTREAM_REPO.lower():
+        print(
+            f"No successful run on '{branch}' in {repo}; checking upstream {UPSTREAM_REPO}...",
+            file=sys.stderr,
+        )
+        for page in range(1, MAX_PAGES + 1):
+            try:
+                upstream_runs = json.loads(
+                    run_gh(
+                        "api",
+                        f"repos/{UPSTREAM_REPO}/actions/workflows/{workflow}/runs"
+                        f"?branch=main&event=push&status=success"
+                        f"&per_page={PER_PAGE}&page={page}",
+                    )
+                )["workflow_runs"]
+            except Exception as e:
+                print(f"Error fetching upstream runs: {e}", file=sys.stderr)
+                break
+
+            for run in upstream_runs:
+                if is_on_branch(run["head_sha"]):
+                    print(f"Upstream base run: {run['html_url']}", file=sys.stderr)
+                    return run["head_sha"]
+
+            if len(upstream_runs) < PER_PAGE:
+                break
 
     # Only reached when no successful run exists or none of them is on the branch
     # anymore (history rewritten). A full rebuild is correct here: publish-repo.py

@@ -185,13 +185,17 @@ def get_module_list(ref: str) -> tuple[list[str], list[str], list[str], bool]:
                 libs.add(lib)
 
     if core_files_changed:
-        (all_modules, all_deleted) = get_all_modules(ref)
+        is_upstream = os.environ.get("GITHUB_REPOSITORY", "").lower() == "keiyoushi/extensions-source"
+        if is_upstream or os.environ.get("FULL_REBUILD") == "true":
+            (all_modules, all_deleted) = get_all_modules(ref)
 
-        # update existing set so we include deleted extensions
-        modules.update(all_modules)
-        deleted.update(all_deleted)
+            # update existing set so we include deleted extensions
+            modules.update(all_modules)
+            deleted.update(all_deleted)
 
-        return sorted(modules), sorted(deleted), get_all_lint_modules(), True
+            return sorted(modules), sorted(deleted), get_all_lint_modules(), True
+        else:
+            print("Core files changed in fork; restricting build to changed modules only", file=sys.stderr)
 
     # Resolve libs that depend on the changed libs (recursively)
     libs.update(
