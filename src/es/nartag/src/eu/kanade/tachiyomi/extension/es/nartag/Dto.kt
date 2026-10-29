@@ -1,11 +1,11 @@
 package eu.kanade.tachiyomi.extension.es.nartag
 
-import keiyoushi.utils.tryParseDate
-import java.time.format.DateTimeFormatter
+import keiyoushi.utils.tryParse
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 
-private val dateFormat = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.US)
+private val dateFormat = SimpleDateFormat("MMM d, yyyy", Locale.US)
 
 private val nonDigit = Regex("\\D+")
 
@@ -15,7 +15,7 @@ fun parseDate(dateStr: String): Long? {
         .replace('é', 'e').replace('ó', 'o')
         .replace('ú', 'u').replace('ñ', 'n')
 
-    if (!cleaned.startsWith("hace")) return dateFormat.tryParseDate(dateStr)
+    if (!cleaned.startsWith("hace")) return dateFormat.tryParse(dateStr)
 
     val num = cleaned.replace(nonDigit, "").toIntOrNull() ?: return null
     val cal = Calendar.getInstance()
