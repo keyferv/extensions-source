@@ -66,10 +66,6 @@
       "note": "Local custom source for ZonaTMO.NET"
     },
     {
-      "path": "src/es/visorcapitulo",
-      "note": "Local custom source for visorcapitulo.com"
-    },
-    {
       "path": "src/es/ritto",
       "note": "Local custom source for ritto.cc"
     },
