@@ -6,13 +6,15 @@ plugins {
 
 keiyoushi {
     name = "MHScans"
-    versionCode = 14
+    theme = "madara"
+    versionCode = 16
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
-    theme = "madara"
 
     source {
         lang = "es"
-        baseUrl = "https://mhscans.com"
+        baseUrl {
+            custom("https://mhscans.com")
+        }
     }
 }

@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Mangas No Sekai"
-    versionCode = 20
+    versionCode = 23
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
     theme = "madara"

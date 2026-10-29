@@ -20,11 +20,14 @@ class ChapterDto(
 
     fun toSChapter(parent: ChapterDto? = null) = SChapter.create().apply {
         val num = this@ChapterDto.numero ?: parent?.numero
+        val title = this@ChapterDto.tituloStr ?: parent?.tituloStr
         this.url = this@ChapterDto.url
-        this.name = this@ChapterDto.tituloStr
-            ?: parent?.tituloStr
-            ?: num?.let { "Capítulo $it" }
-            ?: "Capítulo sin número"
+        this.name = when {
+            num != null && title != null -> "Capítulo $num: $title"
+            num != null -> "Capítulo $num"
+            title != null -> title
+            else -> "Capítulo sin número"
+        }
         this.chapter_number = this@ChapterDto.numberFloat
         this.scanlator = this@ChapterDto.gruposList?.joinToString(" & ") { it.nombre }
     }
@@ -40,10 +43,10 @@ class GroupDto(
 @Serializable
 class PageDto(
     private val src: String,
-    private val fallback: String? = null,
+    private val fallback: String?,
 ) {
     fun toPage(index: Int) = Page(
         index = index,
-        imageUrl = src.ifEmpty { fallback.orEmpty() },
+        url = if (!fallback.isNullOrBlank()) "$src#fallback=$fallback" else src,
     )
 }

@@ -1,60 +1,72 @@
 package eu.kanade.tachiyomi.extension.es.mhscans
 
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
+import android.util.Log
 import eu.kanade.tachiyomi.multisrc.madara.Madara
-import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.getPreferences
+import keiyoushi.utils.asJsoup
+import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class MHScans :
-    Madara(),
-    ConfigurableSource {
+abstract class MHScans : Madara() {
 
     override val chapterDateFormat = DateTimeFormatter.ofPattern("dd 'de' MMMM 'de' yyyy", Locale.forLanguageTag("es"))
 
-    override val mangaSubString = "series"
-
-    override fun OkHttpClient.Builder.configureClient() = rateLimit(1, 3.seconds)
+    override fun OkHttpClient.Builder.configureClient() = rateLimit(1, 3.seconds) { it.host == baseUrl.toHttpUrl().host }
 
     override val chapterMode = ChapterMode.MangaAjax
 
-    private val preferences: SharedPreferences = getPreferences()
+    override val sendViewCount = false
 
-    override fun chapterListSelector(): String {
-        val baseSelector = super.chapterListSelector()
-        val removePremium = preferences.getBoolean(REMOVE_PREMIUM_CHAPTERS, REMOVE_PREMIUM_CHAPTERS_DEFAULT)
+    override fun archiveManga(element: Element, id: String): SManga? {
+        val manga = super.archiveManga(element, id) ?: return null
+        val href = element.selectFirst(archiveUrlSelector)?.attr("abs:href").orEmpty()
+        val path = runCatching { href.toHttpUrl().encodedPath }.getOrNull()
 
-        if (!removePremium) {
-            return baseSelector
+        if (path.isNullOrBlank()) {
+            Log.w(TAG, "archive manga=${manga.title}: unable to resolve path, keeping numeric id=$id")
+            return manga
         }
 
-        return "$baseSelector:not(.premium)"
+        manga.url = path
+        Log.d(TAG, "archive manga=${manga.title}: id=$id url=$path")
+        return manga
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        SwitchPreferenceCompat(screen.context).apply {
-            key = REMOVE_PREMIUM_CHAPTERS
-            title = "Filtrar capítulos de pago"
-            summary = "Oculta automáticamente los capítulos que requieren Taels."
-            setDefaultValue(REMOVE_PREMIUM_CHAPTERS_DEFAULT)
-            setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, "Para aplicar los cambios, actualiza la lista de capítulos", Toast.LENGTH_LONG).show()
-                true
-            }
-        }.also { screen.addPreference(it) }
+    override suspend fun fetchChapterDocument(chapterUrl: String): Document {
+        val document = client.get(chapterUrl).asJsoup()
+        document.selectFirst("form#rk_madara_redirect[method=post]")?.let { form ->
+            val url = form.attr("abs:action").ifEmpty { form.attr("action") }
+            val body = FormBody.Builder().apply {
+                form.select("input").forEach { input ->
+                    add(input.attr("name"), input.attr("value"))
+                }
+            }.build()
+            val headers = headersBuilder().set("Referer", document.location()).build()
+            return client.post(url, headers, body).asJsoup()
+        }
+        return document
     }
 
-    companion object {
-        private const val REMOVE_PREMIUM_CHAPTERS = "removePremiumChapters"
-        private const val REMOVE_PREMIUM_CHAPTERS_DEFAULT = true
+    override fun parsePages(document: Document): List<Page> {
+        super.parsePages(document).takeIf { it.isNotEmpty() }?.let { return it }
+        return document.select("div.rk-page-wrap img, img.rk-img").mapIndexed { index, img ->
+            Page(index, imageUrl = img.attr("abs:src").ifEmpty { img.attr("abs:data-src") })
+        }
+    }
+
+    private companion object {
+        const val TAG = "MHScans"
     }
 }

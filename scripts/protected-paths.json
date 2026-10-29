@@ -94,10 +94,6 @@
       "note": "Migrated from rncalation — anti-bot RK redirect fix, chapter reading"
     },
     {
-      "path": "src/es/lectorxd",
-      "note": "Local custom source"
-    },
-    {
       "path": "src/es/mangalovers",
       "note": "Local custom source"
     },
