@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Niadd"
-    versionCode = 4
+    versionCode = 5
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
@@ -26,6 +26,15 @@ keiyoushi {
         }
     }
     deeplink {
-        path("/manga/..*\\.html")
+        host("niadd.com")
+        host("www.niadd.com")
+        host("es.niadd.com")
+        host("br.niadd.com")
+        host("it.niadd.com")
+        host("ru.niadd.com")
+        host("de.niadd.com")
+        host("fr.niadd.com")
+        path("/manga/..*")
+        path("/original/..*")
     }
 }
