@@ -25,9 +25,8 @@ import java.util.Locale
 @Source
 abstract class Niadd : KeiSource() {
 
-    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
-        add("Referer", "$baseUrl/")
-    }
+    // Causes pageList 302
+    override fun Headers.Builder.configureHeaders() = removeAll("Referer")
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = this
 
