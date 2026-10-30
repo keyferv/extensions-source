@@ -53,8 +53,16 @@ abstract class Niadd : KeiSource() {
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
         if (url.pathSegments.size < 2) return null
 
+        val path = if (url.pathSegments.firstOrNull() == "chapter") {
+            val doc = client.get(url).asJsoup()
+            val mangaLink = doc.selectFirst("a[href*=/manga/], a:has(h2.manga-chp-name)")?.attr("abs:href")
+            mangaLink?.let { runCatching { it.toHttpUrl().encodedPath }.getOrNull() } ?: url.encodedPath
+        } else {
+            url.encodedPath
+        }
+
         return fetchMangaUpdate(
-            SManga.create().apply { this.url = url.encodedPath },
+            SManga.create().apply { this.url = path },
             emptyList(),
             true,
             false,

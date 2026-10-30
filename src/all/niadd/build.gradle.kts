@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Niadd"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
@@ -35,6 +35,7 @@ keiyoushi {
         host("de.niadd.com")
         host("fr.niadd.com")
         path("/manga/..*")
+        path("/chapter/..*")
         path("/original/..*")
     }
 }
