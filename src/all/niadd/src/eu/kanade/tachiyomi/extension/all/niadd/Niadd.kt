@@ -358,7 +358,7 @@ abstract class Niadd : KeiSource() {
         return pages
     }
 
-    override fun imageRequest(page: Page): Request {
+    override fun getImageRequest(page: Page): Request {
         val imgHeaders = headersBuilder()
             .add("Referer", page.url)
             .build()
