@@ -33,7 +33,13 @@ abstract class BarManga : Madara() {
 
     override val pageListParseSelector = "div.page-break"
 
-    override val chapterUrlSelector = "a.ch-link"
+    override fun chapterListSelector() = "li.wp-manga-chapter, li.novel-chap-item"
+
+    override val chapterUrlSelector = "a.ch-link, a.novel-chap-link"
+
+    override val chapterNameSelector = "span.novel-chap-name, a.ch-link"
+
+    override val chapterDateSelector = "span.novel-chap-date, span.chapter-release-date"
 
     override fun archiveManga(element: Element, id: String): SManga? {
         val manga = super.archiveManga(element, id) ?: return null
