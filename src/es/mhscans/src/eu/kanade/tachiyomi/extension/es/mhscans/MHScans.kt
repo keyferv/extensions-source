@@ -18,7 +18,6 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import java.util.Calendar
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
@@ -27,7 +26,7 @@ abstract class MHScans : KeiSource() {
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(2, 1.seconds)
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${normalizeMangaPath(manga.url)}"
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl${normalizeMangaPath(manga.url, baseUrl)}"
 
     override fun getChapterUrl(chapter: SChapter): String = if (chapter.url.startsWith("http")) chapter.url else "$baseUrl${chapter.url}"
 
@@ -126,7 +125,7 @@ abstract class MHScans : KeiSource() {
     }
 
     private suspend fun fetchMangaDocument(mangaUrl: String): Document {
-        val normalizedPath = normalizeMangaPath(mangaUrl)
+        val normalizedPath = normalizeMangaPath(mangaUrl, baseUrl)
         val response = client.get("$baseUrl$normalizedPath", fetch = Fetch.DOCUMENT)
         if (response.code == 404 && normalizedPath.startsWith("/comics/mhscans-")) {
             response.close()
@@ -167,63 +166,20 @@ abstract class MHScans : KeiSource() {
 
     private suspend fun fetchChapterList(document: Document, manga: SManga): List<SChapter> {
         val comicSlug = document.selectFirst("#chapter-list")?.attr("data-comic-slug")
-            ?: normalizeMangaPath(manga.url).removePrefix("/comics/").trim('/')
+            ?: normalizeMangaPath(manga.url, baseUrl).removePrefix("/comics/").trim('/')
 
-        val chapters = mutableListOf<SChapter>()
-        var page = 1
-        var totalPages = 1
-
-        while (page <= totalPages) {
+        val chapters = walkChapterPages { page ->
             val response = client.get("$baseUrl/comics/$comicSlug/chapters?page=$page", fetch = Fetch.XHR)
-            if (!response.isSuccessful) break
-
+            if (!response.isSuccessful) {
+                return@walkChapterPages Pair(emptyList(), null)
+            }
             val pagesHeader = response.header("X-Pages")?.toIntOrNull()
-            if (pagesHeader != null && pagesHeader > totalPages) {
-                totalPages = pagesHeader
-            }
-
             val doc = response.asJsoup()
-            val chapterElements = doc.select("a[data-chapter-num]")
-
-            for (element in chapterElements) {
-                val href = element.attr("href")
-                if (!href.startsWith("/leer/")) continue
-
-                val chapter = SChapter.create().apply {
-                    url = href
-                    val label = element.attr("data-chapter-label")
-                    name = label.ifEmpty { element.selectFirst(".text-sm")?.text().orEmpty() }
-
-                    val numStr = element.attr("data-chapter-num")
-                    chapter_number = numStr.toFloatOrNull() ?: parseChapterNumber(name)
-
-                    val dateText = element.selectFirst(".text-\\[0\\.65rem\\], span:containsOwn(Hace)")?.text()
-                    date_upload = parseRelativeDate(dateText)
-                }
-                chapters.add(chapter)
-            }
-
-            page++
+            Pair(parseChapterElements(doc.select("a[data-chapter-num]")), pagesHeader)
         }
 
         if (chapters.isEmpty()) {
-            val initialElements = document.select("a[data-chapter-num]")
-            for (element in initialElements) {
-                val href = element.attr("href")
-                if (!href.startsWith("/leer/")) continue
-
-                chapters.add(
-                    SChapter.create().apply {
-                        url = href
-                        val label = element.attr("data-chapter-label")
-                        name = label.ifEmpty { element.selectFirst(".text-sm")?.text().orEmpty() }
-                        val numStr = element.attr("data-chapter-num")
-                        chapter_number = numStr.toFloatOrNull() ?: parseChapterNumber(name)
-                        val dateText = element.selectFirst(".text-\\[0\\.65rem\\], span:containsOwn(Hace)")?.text()
-                        date_upload = parseRelativeDate(dateText)
-                    },
-                )
-            }
+            return parseChapterElements(document.select("a[data-chapter-num]"))
         }
 
         return chapters
@@ -264,34 +220,6 @@ abstract class MHScans : KeiSource() {
             return parseMangaDetails(doc, manga)
         }
         return null
-    }
-
-    private fun normalizeMangaPath(rawUrl: String): String {
-        val clean = rawUrl.substringAfter(baseUrl).trimStart('/')
-        if (clean.startsWith("series/")) {
-            val slug = clean.removePrefix("series/").trim('/')
-            return if (slug.startsWith("mhscans-")) "/comics/$slug" else "/comics/mhscans-$slug"
-        }
-        return if (clean.startsWith("/")) clean else "/$clean"
-    }
-
-    private fun parseChapterNumber(name: String): Float = CHAPTER_NUM_REGEX.find(name)?.value?.toFloatOrNull() ?: -1f
-
-    private fun parseRelativeDate(dateStr: String?): Long {
-        if (dateStr.isNullOrBlank()) return 0L
-        val trimmed = dateStr.trim().lowercase(Locale.ROOT)
-        val number = NUMBER_REGEX.find(trimmed)?.value?.toIntOrNull() ?: return 0L
-        val now = Calendar.getInstance()
-        when {
-            trimmed.contains("min") || trimmed.endsWith("m") -> now.add(Calendar.MINUTE, -number)
-            trimmed.contains("hora") || trimmed.endsWith("h") -> now.add(Calendar.HOUR_OF_DAY, -number)
-            trimmed.contains("día") || trimmed.contains("dia") || trimmed.endsWith("d") -> now.add(Calendar.DAY_OF_MONTH, -number)
-            trimmed.contains("sem") || trimmed.endsWith("w") -> now.add(Calendar.WEEK_OF_YEAR, -number)
-            trimmed.contains("mes") -> now.add(Calendar.MONTH, -number)
-            trimmed.contains("año") || trimmed.contains("ano") || trimmed.endsWith("y") -> now.add(Calendar.YEAR, -number)
-            else -> return 0L
-        }
-        return now.timeInMillis
     }
 
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
@@ -387,11 +315,5 @@ abstract class MHScans : KeiSource() {
             16 -> "Sistema"
             else -> ""
         }
-    }
-
-    private companion object {
-        val NUMBER_REGEX = Regex("""\d+""")
-        val CHAPTER_NUM_REGEX = Regex("""([0-9]+(?:\.[0-9]+)?)""")
-        val OLD_CHAPTER_REGEX = Regex("""/series/([^/]+)/capitulo-([0-9.]+)""", RegexOption.IGNORE_CASE)
     }
 }

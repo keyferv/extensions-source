@@ -24,3 +24,23 @@ keiyoushi {
         path("/series/..*")
     }
 }
+
+android {
+    sourceSets.getByName("test") {
+        java.directories.add("test")
+        kotlin.directories.add("test")
+    }
+}
+
+tasks.matching { it.name == "kspDebugUnitTestKotlin" }.configureEach {
+    enabled = false
+}
+
+dependencies {
+    testImplementation(project(":core"))
+    testImplementation(libs.bundles.common)
+    testImplementation(libs.kotlin.stdlib)
+    testImplementation(libs.tachiyomi.lib.v16)
+    testImplementation(libs.junit)
+    testImplementation(libs.jsoup)
+}
