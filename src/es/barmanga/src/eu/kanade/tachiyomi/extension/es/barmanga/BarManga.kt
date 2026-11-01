@@ -14,6 +14,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.io.ByteArrayInputStream
 import java.net.URL
@@ -40,6 +41,18 @@ abstract class BarManga : Madara() {
     override val chapterNameSelector = "span.novel-chap-name, a.ch-link"
 
     override val chapterDateSelector = "span.novel-chap-date, span.chapter-release-date"
+
+    override fun parseDetails(document: Document, id: String, preserveUrl: String?): SManga {
+        val manga = super.parseDetails(document, id, preserveUrl)
+        val isNovel = document.selectFirst("div.post-content_item:has(div.summary-heading:contains(Tipo)) div.summary-content")
+            ?.text()?.contains("Novela", ignoreCase = true) == true ||
+            document.selectFirst("li.novel-chap-item") != null
+        if (isNovel) {
+            val prefix = "[NOVELA LIGERA - Usá 'Abrir en WebView' para leer]\n\n"
+            manga.description = prefix + (manga.description ?: "")
+        }
+        return manga
+    }
 
     override fun archiveManga(element: Element, id: String): SManga? {
         val manga = super.archiveManga(element, id) ?: return null
@@ -108,8 +121,17 @@ abstract class BarManga : Madara() {
 
         // ── 4. FALLBACK: imágenes estáticas fuera de page-break ──
         val staticPages = parseStaticImages(document)
-        Log.d(TAG, "✓ used STATIC IMAGES: ${staticPages.size} pages")
-        return staticPages
+        if (staticPages.isNotEmpty()) {
+            Log.d(TAG, "✓ used STATIC IMAGES: ${staticPages.size} pages")
+            return staticPages
+        }
+
+        // ── 5. NOVELA WEB: texto puro sin imágenes de manga ──
+        if (document.selectFirst("div.reading-content article, div.reading-content p") != null) {
+            throw Exception("Esta obra es una novela ligera en formato texto. Usá la opción 'Abrir en WebView' para leerla.")
+        }
+
+        return emptyList()
     }
 
     /**
