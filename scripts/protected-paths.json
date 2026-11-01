@@ -11,7 +11,7 @@
     },
     {
       "path": "src/es/barmanga",
-      "note": "Primary work — DNS, ZIP anti-scrape, popular/latest restore"
+      "note": "Primary work \u2014 DNS, ZIP anti-scrape, popular/latest restore"
     },
     {
       "path": "src/es/olympusscanlation",
@@ -83,7 +83,7 @@
     },
     {
       "path": "src/es/nartag",
-      "note": "Migrated from rncalation — anti-bot RK redirect fix, chapter reading"
+      "note": "Migrated from rncalation \u2014 anti-bot RK redirect fix, chapter reading"
     },
     {
       "path": "src/es/mangalovers",
@@ -104,6 +104,10 @@
     {
       "path": "src/es/omniscan",
       "note": "Local custom source for omniscan.site"
+    },
+    {
+      "path": "src/es/leercapitulo",
+      "note": "Local site template and chapter fixes"
     }
   ]
 }
