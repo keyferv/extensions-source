@@ -6,8 +6,7 @@ plugins {
 
 keiyoushi {
     name = "MHScans"
-    theme = "madara"
-    versionCode = 16
+    versionCode = 17
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
@@ -16,5 +15,12 @@ keiyoushi {
         baseUrl {
             custom("https://mhscans.com")
         }
+    }
+
+    deeplink {
+        host("mhscans.com")
+        path("/comics/..*")
+        path("/leer/..*")
+        path("/series/..*")
     }
 }
