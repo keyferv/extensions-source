@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
@@ -47,7 +48,7 @@ abstract class Lectorxd : KeiSource() {
     }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val document = client.get("$baseUrl/catalogo?adult=safe&orderBy=views&filters=true&page=$page").asJsoup()
+        val document = client.get("$baseUrl/catalogo?adult=safe&orderBy=views&filters=true&page=$page", Fetch.DOCUMENT).asJsoup()
 
         val mangas = document.select(".manga-grid a[href]").mapNotNull { card ->
             val title = card.selectFirst("h4")?.text()?.trim() ?: return@mapNotNull null
@@ -65,7 +66,7 @@ abstract class Lectorxd : KeiSource() {
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val document = client.get("$baseUrl/catalogo?page=$page").asJsoup()
+        val document = client.get("$baseUrl/catalogo?page=$page", Fetch.DOCUMENT).asJsoup()
 
         val mangas = document.select(".manga-grid a[href]").mapNotNull { card ->
             val title = card.selectFirst("h4")?.text()?.trim() ?: return@mapNotNull null
@@ -87,7 +88,7 @@ abstract class Lectorxd : KeiSource() {
             .addQueryParameter("search", query)
             .addQueryParameter("page", page.toString())
             .build()
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
 
         val mangas = document.select(".manga-grid a[href]").mapNotNull { card ->
             val title = card.selectFirst("h4")?.text()?.trim() ?: return@mapNotNull null
@@ -110,7 +111,7 @@ abstract class Lectorxd : KeiSource() {
         if (slugIndex == -1 || slugIndex + 1 >= segments.size) return null
         val slug = segments[slugIndex + 1]
 
-        val response = client.get("$baseUrl/api/mangas/preview?slug=$slug").parseAs<MangaPreviewResponse>()
+        val response = client.get("$baseUrl/api/mangas/preview?slug=$slug", Fetch.XHR).parseAs<MangaPreviewResponse>()
         if (!response.success) return null
         return response.manga?.toSManga()
     }
