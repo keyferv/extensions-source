@@ -42,6 +42,25 @@ class StatusFilter :
 
 class GenreFilter(genres: List<String>) : SelectFilter("Género", "genre", listOf("Todos" to "") + genres.map { it to it })
 
+internal val DEFAULT_GENRES = listOf(
+    "Acción",
+    "Aliado",
+    "Artes Marciales",
+    "Aventura",
+    "Ciencia ficción",
+    "Comedia",
+    "Drama",
+    "Fantasía",
+    "Manhua",
+    "Manhwa",
+    "Meian",
+    "Nuevo",
+    "Recomendado",
+    "Reencarnación",
+    "Shounen",
+    "Sistema",
+)
+
 private val sortOptions = listOf(
     "Más reciente" to "latest",
     "Actualizado" to "updated",

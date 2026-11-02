@@ -17,6 +17,12 @@ internal fun normalizeMangaPath(rawUrl: String, baseUrl: String = ""): String {
         val slug = clean.removePrefix("series/").trim('/')
         return if (slug.startsWith("mhscans-")) "/comics/$slug" else "/comics/mhscans-$slug"
     }
+    if (clean.startsWith("comics/")) {
+        return "/$clean"
+    }
+    if (!clean.contains('/')) {
+        return "/comics/$clean"
+    }
     return if (clean.startsWith("/")) clean else "/$clean"
 }
 
@@ -51,12 +57,12 @@ internal fun parseChapterElements(
         val chapter = chapterFactory().apply {
             url = href
             val label = element.attr("data-chapter-label")
-            name = label.ifEmpty { element.selectFirst(".text-sm")?.text().orEmpty() }
+            name = label.ifEmpty { element.selectFirst("[data-cl-title], .text-sm")?.text().orEmpty() }
 
             val numStr = element.attr("data-chapter-num")
             chapter_number = parseChapterNumber(name, numStr)
 
-            val dateText = element.selectFirst(".text-\\[0\\.65rem\\], span:containsOwn(Hace)")?.text()
+            val dateText = element.selectFirst("[data-cl-title] + div > span, .text-\\[0\\.65rem\\], span:containsOwn(Hace)")?.text()
             date_upload = parseRelativeDate(dateText)
         }
         chapters.add(chapter)

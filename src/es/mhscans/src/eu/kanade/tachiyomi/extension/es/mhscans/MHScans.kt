@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.es.mhscans
 
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -13,6 +12,8 @@ import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonElement
 import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -28,7 +29,12 @@ abstract class MHScans : KeiSource() {
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${normalizeMangaPath(manga.url, baseUrl)}"
 
-    override fun getChapterUrl(chapter: SChapter): String = if (chapter.url.startsWith("http")) chapter.url else "$baseUrl${chapter.url}"
+    override fun getChapterUrl(chapter: SChapter): String = when {
+        chapter.url.startsWith("http") -> chapter.url
+        chapter.url.startsWith("/leer/") -> "$baseUrl${chapter.url}"
+        chapter.url.startsWith("/") -> "$baseUrl${chapter.url}"
+        else -> "$baseUrl/leer/${chapter.url}"
+    }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val document = client.get("$baseUrl/library?sort=views&page=$page", fetch = Fetch.DOCUMENT).asJsoup()
@@ -137,8 +143,8 @@ abstract class MHScans : KeiSource() {
 
     private fun parseMangaDetails(document: Document, manga: SManga): SManga = SManga.create().apply {
         url = manga.url
-        title = document.selectFirst("h1")?.text() ?: manga.title
-        thumbnail_url = document.selectFirst(".comic-hero img.comic-cover__img, .comic-cover img")?.let { img ->
+        title = document.selectFirst(".comic-hero h1, h1")?.text() ?: manga.title
+        thumbnail_url = document.selectFirst(".comic-hero img.comic-cover__img, .comic-hero__cover img, .comic-cover img")?.let { img ->
             img.attr("abs:src").ifEmpty { img.attr("abs:data-src") }
         } ?: manga.thumbnail_url
 
@@ -147,13 +153,13 @@ abstract class MHScans : KeiSource() {
         val statusText = document.selectFirst(".comic-meta__status")?.text()?.lowercase(Locale.ROOT).orEmpty()
         status = when {
             statusText.contains("emisión") || statusText.contains("emision") || statusText.contains("ongoing") -> SManga.ONGOING
-            statusText.contains("finalizado") || statusText.contains("completed") -> SManga.COMPLETED
-            statusText.contains("hiatus") || statusText.contains("pausa") -> SManga.ON_HIATUS
+            statusText.contains("finalizado") || statusText.contains("completado") || statusText.contains("completed") -> SManga.COMPLETED
+            statusText.contains("hiatus") || statusText.contains("hiato") || statusText.contains("pausa") -> SManga.ON_HIATUS
             statusText.contains("cancelado") || statusText.contains("cancelled") -> SManga.CANCELLED
             else -> SManga.UNKNOWN
         }
 
-        val genres = document.select(".comic-chips li.comic-chip, .comic-meta > span:not(.comic-meta__sep):not(.comic-meta__status)")
+        val genres = document.select(".comic-chips li, .comic-meta > span:not(.comic-meta__sep):not(.comic-meta__status)")
             .map { it.text().trim() }
             .filter { it.isNotEmpty() }
             .distinct()
@@ -197,6 +203,7 @@ abstract class MHScans : KeiSource() {
 
     private suspend fun resolveChapterUrl(chapter: SChapter): String {
         if (chapter.url.startsWith("/leer/")) return chapter.url
+        if (!chapter.url.startsWith("/") && !chapter.url.startsWith("http")) return "/leer/${chapter.url}"
 
         val match = OLD_CHAPTER_REGEX.find(chapter.url)
         if (match != null) {
@@ -222,98 +229,21 @@ abstract class MHScans : KeiSource() {
         return null
     }
 
+    override val supportsFilterFetching = true
+
+    override suspend fun fetchFilterData(): JsonElement = client.get("$baseUrl/library", fetch = Fetch.DOCUMENT).asJsoup()
+        .select("a.dd-opt[href*=genre=]")
+        .mapNotNull { it.absUrl("href").toHttpUrl().queryParameter("genre") }
+        .distinct()
+        .toJsonElement()
+
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
-        SortFilter(),
-        StatusFilter(),
-        TypeFilter(),
-        GenreFilter(),
+        buildList {
+            add(SortFilter())
+            add(TypeFilter())
+            add(StatusFilter())
+            val genres = data?.parseAs<List<String>>()?.takeIf { it.isNotEmpty() } ?: DEFAULT_GENRES
+            add(GenreFilter(genres))
+        },
     )
-
-    private class SortFilter :
-        Filter.Select<String>(
-            "Ordenar por",
-            arrayOf("Predeterminado", "Visitas", "Actualización", "Calificación", "Título"),
-        ) {
-        val selected get() = when (state) {
-            1 -> "views"
-            2 -> "updated"
-            3 -> "rating"
-            4 -> "title"
-            else -> ""
-        }
-    }
-
-    private class StatusFilter :
-        Filter.Select<String>(
-            "Estado",
-            arrayOf("Todos", "En emisión", "Finalizado", "En pausa", "Cancelado"),
-        ) {
-        val selected get() = when (state) {
-            1 -> "Ongoing"
-            2 -> "Completed"
-            3 -> "Hiatus"
-            4 -> "Cancelled"
-            else -> ""
-        }
-    }
-
-    private class TypeFilter :
-        Filter.Select<String>(
-            "Tipo",
-            arrayOf("Todos", "Manga", "Manhwa", "Manhua", "Doujinshi", "Novela", "Otros"),
-        ) {
-        val selected get() = when (state) {
-            1 -> "Manga"
-            2 -> "Manhwa"
-            3 -> "Manhua"
-            4 -> "Doujinshi"
-            5 -> "Novel"
-            6 -> "Other"
-            else -> ""
-        }
-    }
-
-    private class GenreFilter :
-        Filter.Select<String>(
-            "Género",
-            arrayOf(
-                "Todos",
-                "Acción",
-                "Aliado",
-                "Artes Marciales",
-                "Aventura",
-                "Ciencia ficción",
-                "Comedia",
-                "Drama",
-                "Fantasía",
-                "Manhua",
-                "Manhwa",
-                "Meian",
-                "Nuevo",
-                "Recomendado",
-                "Reencarnación",
-                "Shounen",
-                "Sistema",
-            ),
-        ) {
-        val selected get() = when (state) {
-            1 -> "Acción"
-            2 -> "Aliado"
-            3 -> "Artes Marciales"
-            4 -> "Aventura"
-            5 -> "Ciencia ficción"
-            6 -> "Comedia"
-            7 -> "Drama"
-            8 -> "Fantasía"
-            9 -> "Manhua"
-            10 -> "Manhwa"
-            11 -> "Meian"
-            12 -> "Nuevo"
-            13 -> "Recomendado"
-            14 -> "Reencarnación"
-            15 -> "Shounen"
-            16 -> "Sistema"
-            else -> ""
-        }
-    }
 }

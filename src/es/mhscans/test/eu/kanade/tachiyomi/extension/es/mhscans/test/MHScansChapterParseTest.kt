@@ -103,6 +103,14 @@ class MHScansChapterParseTest {
             normalizeMangaPath("/comics/monarca-del-caos"),
         )
         assertEquals(
+            "/comics/monarca-del-caos",
+            normalizeMangaPath("monarca-del-caos"),
+        )
+        assertEquals(
+            "/comics/monarca-del-caos",
+            normalizeMangaPath("comics/monarca-del-caos"),
+        )
+        assertEquals(
             "/comics/mhscans-test",
             normalizeMangaPath("https://mhscans.com/series/test/", "https://mhscans.com"),
         )
@@ -158,5 +166,26 @@ class MHScansChapterParseTest {
         assertEquals("/leer/IO_JD8y7XynjnG4nzcCU4", chapters[1].url)
         assertEquals("Capítulo 375", chapters[1].name)
         assertEquals(375f, chapters[1].chapter_number, 0.001f)
+    }
+
+    @Test
+    fun `parseChapterElements parses upstream site markup with data-cl-title`() {
+        val upstreamHtml = """
+            <div>
+                <a href="/leer/upstream_slug_123" data-chapter-num="50.5">
+                    <span data-cl-title>Capítulo 50.5</span>
+                    <div><span>hace 2 días</span></div>
+                </a>
+            </div>
+        """.trimIndent()
+
+        val doc = Jsoup.parse(upstreamHtml)
+        val chapters = parseChapterElements(doc.select("a[data-chapter-num]")) { TestChapter() }
+
+        assertEquals(1, chapters.size)
+        assertEquals("/leer/upstream_slug_123", chapters[0].url)
+        assertEquals("Capítulo 50.5", chapters[0].name)
+        assertEquals(50.5f, chapters[0].chapter_number, 0.001f)
+        assertTrue(chapters[0].date_upload > 0L)
     }
 }
