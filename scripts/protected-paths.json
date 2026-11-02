@@ -120,6 +120,10 @@
     {
       "path": "src/all/openhentai",
       "note": "Local custom source for openhentai.org with spanish priority"
+    },
+    {
+      "path": "src/es/hmanga",
+      "note": "Local custom source for hmanga.asia"
     }
   ]
 }
