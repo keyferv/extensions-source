@@ -108,6 +108,18 @@
     {
       "path": "src/es/leercapitulo",
       "note": "Local site template and chapter fixes"
+    },
+    {
+      "path": "src/es/lectorxd",
+      "note": "Local custom source"
+    },
+    {
+      "path": "src/all/ehentai",
+      "note": "Local custom source for e-hentai.org with spanish priority"
+    },
+    {
+      "path": "src/all/openhentai",
+      "note": "Local custom source for openhentai.org with spanish priority"
     }
   ]
 }

@@ -5,17 +5,18 @@ plugins {
 }
 
 keiyoushi {
-    name = "LectorXD"
-    versionCode = 4
+    name = "lectorxd"
+    versionCode = 3
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
     source {
-        lang = "es"
+        name = "LectorXD"
         baseUrl = "https://lectorxd.com"
+        lang = "es"
     }
 
     deeplink {
-        path("/manga/..*")
+        path("/..*")
     }
 }
