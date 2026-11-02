@@ -202,7 +202,9 @@ abstract class Hmanga : KeiSource() {
     private fun parseMangasPage(document: Document): MangasPage {
         val articles = document.select("article.card, article[id^='post-']")
         val mangas = articles.mapNotNull { article ->
-            val link = article.selectFirst("a.lanzador[href]") ?: article.selectFirst("a[href]")
+            val link = article.selectFirst("a[rel='bookmark']")
+                ?: article.selectFirst("a:has(img)")
+                ?: article.selectFirst("a.lanzador:not([href*='/autor/'])")
                 ?: return@mapNotNull null
             val mangaUrl = link.attr("abs:href").toHttpUrlOrNull()?.encodedPath
                 ?: return@mapNotNull null
@@ -221,10 +223,16 @@ abstract class Hmanga : KeiSource() {
                 }
             }
 
+            val authorName = article.selectFirst("a.tag-autor, a.wpp-taxonomy, a[href*='/autor/']")?.text()?.trim()
+
             SManga.create().apply {
                 this.url = mangaUrl
                 this.title = title
                 this.thumbnail_url = coverUrl
+                if (!authorName.isNullOrBlank()) {
+                    this.author = authorName
+                    this.artist = authorName
+                }
             }
         }.distinctBy { it.url }
 
@@ -235,7 +243,9 @@ abstract class Hmanga : KeiSource() {
     private fun parseSeriesChapters(seriesDoc: Document): List<SChapter> {
         val articles = seriesDoc.select("article")
         val chapters = articles.mapNotNull { article ->
-            val link = article.selectFirst("a.lanzador") ?: article.selectFirst("a")
+            val link = article.selectFirst("a[rel='bookmark']")
+                ?: article.selectFirst("a:has(img)")
+                ?: article.selectFirst("a.lanzador:not([href*='/autor/'])")
                 ?: return@mapNotNull null
             val chapterUrl = link.attr("abs:href").toHttpUrlOrNull()?.encodedPath
                 ?: return@mapNotNull null
