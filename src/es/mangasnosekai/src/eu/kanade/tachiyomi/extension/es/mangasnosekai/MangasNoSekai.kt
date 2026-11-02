@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.annotation.Source
 import keiyoushi.lib.synchrony.Deobfuscator
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.network.rateLimit
@@ -217,7 +218,7 @@ abstract class MangasNoSekai :
             if (page > 1) append("page/$page/")
             append("?m_orderby=$order")
         }
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select("div.page-listing-item > div.row > div").mapNotNull { element ->
             val manga = SManga.create()
             with(element) {
@@ -243,7 +244,7 @@ abstract class MangasNoSekai :
                 addQueryParameter("s", query)
                 addQueryParameter("post_type", "wp-manga")
             }.build()
-            val document = client.get(url).asJsoup()
+            val document = client.get(url, Fetch.DOCUMENT).asJsoup()
             val mangas = document.select("div.c-tabs-item__content, .manga__item").mapNotNull { element ->
                 val link = element.selectFirst("div.post-title a") ?: element.selectFirst("a[href]") ?: return@mapNotNull null
                 val href = link.attr("abs:href").takeIf(String::isNotBlank) ?: return@mapNotNull null
@@ -337,11 +338,11 @@ abstract class MangasNoSekai :
         .build()
 
     override suspend fun fetchChapters(mangaPath: String, id: String, mangaPage: Document?): List<SChapter> {
-        val document = mangaPage ?: client.get("$baseUrl$mangaPath").asJsoup()
+        val document = mangaPage ?: client.get("$baseUrl$mangaPath", Fetch.DOCUMENT).asJsoup()
 
         val coreScript = document.selectFirst("script#wp-manga-js")?.attr("abs:src")
             ?: throw Exception("No se pudo obtener el script del capítulo")
-        val coreScriptBodyRaw = client.get(coreScript).use { it.body.string() }
+        val coreScriptBodyRaw = client.get(coreScript, headers, Fetch.SCRIPT).use { it.body.string() }
         val coreScriptBody = Deobfuscator.deobfuscateScript(coreScriptBodyRaw)
             ?: throw Exception("No se pudo deobfuscar el script")
 
@@ -367,7 +368,7 @@ abstract class MangasNoSekai :
         var page = 1
         do {
             val form = altChapterRequest(url, mangaId, page, objects)
-            val response = client.post(baseUrl + url, xhrHeaders, form)
+            val response = client.post(baseUrl + url, xhrHeaders, Fetch.XHR, form, ensureSuccess = false)
             if (!response.isSuccessful) {
                 response.close()
                 throw Exception("HTTP ${response.code}: Intente iniciar sesión en WebView")
