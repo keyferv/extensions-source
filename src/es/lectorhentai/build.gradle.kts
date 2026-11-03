@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "LectorHentai"
-    versionCode = 9
+    versionCode = 10
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
@@ -20,4 +20,8 @@ keiyoushi {
         host("www.lectorhentai.com")
         path("/..*")
     }
+}
+
+dependencies {
+    implementation(project(":lib:unpacker"))
 }

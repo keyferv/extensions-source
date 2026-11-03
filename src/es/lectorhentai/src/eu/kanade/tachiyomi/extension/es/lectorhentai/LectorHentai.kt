@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.es.lectorhentai
 
+import android.util.Base64
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -8,10 +9,16 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.lib.unpacker.Unpacker
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.aesDecrypt
+import keiyoushi.utils.aesGcm
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.parseAs
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -45,7 +52,7 @@ abstract class LectorHentai : KeiSource() {
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val url = if (page > 1) "$baseUrl/?page=$page" else baseUrl
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
         val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
         return MangasPage(mangas, hasNextPage)
@@ -89,7 +96,7 @@ abstract class LectorHentai : KeiSource() {
             }
         }
 
-        val document = client.get(url.build()).asJsoup()
+        val document = client.get(url.build(), Fetch.DOCUMENT).asJsoup()
         val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
         val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
         return MangasPage(mangas, hasNextPage)
@@ -134,7 +141,7 @@ abstract class LectorHentai : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val document = client.get("$baseUrl${manga.url}").asJsoup()
+        val document = client.get("$baseUrl${manga.url}", Fetch.DOCUMENT).asJsoup()
         val updatedManga = if (fetchDetails) {
             mangaDetailsParse(document).apply {
                 url = manga.url
@@ -151,11 +158,28 @@ abstract class LectorHentai : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get("$baseUrl${chapter.url}").asJsoup()
+        val document = client.get("$baseUrl${chapter.url}", Fetch.DOCUMENT).asJsoup()
         return pageListParse(document)
     }
 
     private fun pageListParse(document: Document): List<Page> {
+        val unpackedScript = document.selectFirst("script:containsData(eval)")?.data()
+            ?.let(Unpacker::unpack)
+
+        if (unpackedScript != null) {
+            val blobJson = READER_BLOB_REGEX.find(unpackedScript)?.groupValues?.get(1)
+            if (blobJson != null) {
+                val blob = blobJson.parseAs<ReaderBlob>()
+                val images = decryptReaderBlob(blob)
+                if (images.isNotEmpty()) {
+                    return images.mapIndexed { index, url ->
+                        val fullUrl = if (url.startsWith("//")) "https:$url" else url
+                        Page(index, imageUrl = fullUrl)
+                    }
+                }
+            }
+        }
+
         val html = document.html()
 
         val imagesRegex = Regex(""""images"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
@@ -203,6 +227,12 @@ abstract class LectorHentai : KeiSource() {
         }
 
         return emptyList()
+    }
+
+    private fun decryptReaderBlob(blob: ReaderBlob): List<String> {
+        val cipher = aesGcm(Base64.decode(blob.k, Base64.DEFAULT), Base64.decode(blob.iv, Base64.DEFAULT))
+        val plaintext = Base64.decode(blob.c, Base64.DEFAULT).aesDecrypt(cipher).decodeToString()
+        return plaintext.parseAs<ReaderImages>().p
     }
 
     private class GenreFilter(name: String) : Filter.CheckBox(name)
@@ -268,5 +298,18 @@ abstract class LectorHentai : KeiSource() {
 
     companion object {
         const val PREFIX_ID_SEARCH = "id:"
+        private val READER_BLOB_REGEX = """ReaderBlob\.start\((\{.+?\})\)""".toRegex()
     }
+}
+
+@Serializable
+class ReaderBlob {
+    val k: String = ""
+    val iv: String = ""
+    val c: String = ""
+}
+
+@Serializable
+class ReaderImages {
+    val p: List<String> = emptyList()
 }
