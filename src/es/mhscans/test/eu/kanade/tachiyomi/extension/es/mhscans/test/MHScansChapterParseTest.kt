@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.mhscans.test
 
+import eu.kanade.tachiyomi.extension.es.mhscans.MILLIS_PER_DAY
+import eu.kanade.tachiyomi.extension.es.mhscans.MILLIS_PER_MINUTE
 import eu.kanade.tachiyomi.extension.es.mhscans.normalizeMangaPath
 import eu.kanade.tachiyomi.extension.es.mhscans.parseChapterElements
 import eu.kanade.tachiyomi.extension.es.mhscans.parseChapterNumber
@@ -134,6 +136,43 @@ class MHScansChapterParseTest {
         assertTrue(parseRelativeDate("15 min") > 0L)
         assertEquals(0L, parseRelativeDate(null))
         assertEquals(0L, parseRelativeDate(""))
+    }
+
+    @Test
+    fun `parseRelativeDate treats sem as weeks not minutes`() {
+        val now = System.currentTimeMillis()
+
+        val threeWeeksAgo = parseRelativeDate("Hace 3 sem")
+        val threeDaysAgo = parseRelativeDate("Hace 3 días")
+        val threeMinutesAgo = parseRelativeDate("Hace 3 min")
+
+        assertTrue("3 sem must be older than 3 días", threeWeeksAgo < threeDaysAgo)
+        assertTrue("3 días must be older than 3 min", threeDaysAgo < threeMinutesAgo)
+
+        val daysBehind = (now - threeWeeksAgo) / MILLIS_PER_DAY
+        assertEquals(21L, daysBehind)
+    }
+
+    @Test
+    fun `parseRelativeDate keeps a known date that still fits the label`() {
+        val now = System.currentTimeMillis()
+        val knownThreeWeeksAgo = now - 21L * MILLIS_PER_DAY
+
+        assertEquals(
+            knownThreeWeeksAgo,
+            parseRelativeDate("Hace 3 sem", knownThreeWeeksAgo),
+        )
+    }
+
+    @Test
+    fun `parseRelativeDate replaces a known date that no longer fits the label`() {
+        val now = System.currentTimeMillis()
+        val staleKnownDate = now - 3L * MILLIS_PER_MINUTE
+
+        val parsed = parseRelativeDate("Hace 3 sem", staleKnownDate)
+
+        assertTrue("stale known date must be replaced", parsed != staleKnownDate)
+        assertEquals(21L, (now - parsed) / MILLIS_PER_DAY)
     }
 
     @Test

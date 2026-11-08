@@ -126,7 +126,7 @@ abstract class MHScans : KeiSource() {
     ): SMangaUpdate {
         val document = fetchMangaDocument(manga.url)
         val updatedManga = if (fetchDetails) parseMangaDetails(document, manga) else manga
-        val updatedChapters = if (fetchChapters) fetchChapterList(document, manga) else chapters
+        val updatedChapters = if (fetchChapters) fetchChapterList(document, manga, chapters) else chapters
         return SMangaUpdate(updatedManga, updatedChapters)
     }
 
@@ -170,9 +170,14 @@ abstract class MHScans : KeiSource() {
         author = document.selectFirst(".flex:has(img) a[href^='/groups/']")?.text()
     }
 
-    private suspend fun fetchChapterList(document: Document, manga: SManga): List<SChapter> {
+    private suspend fun fetchChapterList(
+        document: Document,
+        manga: SManga,
+        existingChapters: List<SChapter> = emptyList(),
+    ): List<SChapter> {
         val comicSlug = document.selectFirst("#chapter-list")?.attr("data-comic-slug")
             ?: normalizeMangaPath(manga.url, baseUrl).removePrefix("/comics/").trim('/')
+        val knownDates = existingChapters.associate { it.url to it.date_upload }
 
         val chapters = walkChapterPages { page ->
             val response = client.get("$baseUrl/comics/$comicSlug/chapters?page=$page", fetch = Fetch.XHR)
@@ -181,11 +186,11 @@ abstract class MHScans : KeiSource() {
             }
             val pagesHeader = response.header("X-Pages")?.toIntOrNull()
             val doc = response.asJsoup()
-            Pair(parseChapterElements(doc.select("a[data-chapter-num]")), pagesHeader)
+            Pair(parseChapterElements(doc.select("a[data-chapter-num]"), knownDates), pagesHeader)
         }
 
         if (chapters.isEmpty()) {
-            return parseChapterElements(document.select("a[data-chapter-num]"))
+            return parseChapterElements(document.select("a[data-chapter-num]"), knownDates)
         }
 
         return chapters
