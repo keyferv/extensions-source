@@ -23,7 +23,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -38,10 +37,7 @@ import java.util.Locale
 @Source
 abstract class Niadd : KeiSource() {
 
-    // Causes pageList 302 redirect loop to dead host
-    override fun Headers.Builder.configureHeaders(): Headers.Builder = removeAll("Referer")
-
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addNetworkInterceptor(::blockedUserInterceptor)
+    override fun OkHttpClient.Builder.configureClient() = addNetworkInterceptor(::blockedUserInterceptor)
 
     // The site flags networks with a cookie and then serves a fake "404 Not Found" page with status 200 on every route.
     // A flagged network gets that page with or without the cookie, so the cookie only keeps blocking after a network change.
@@ -112,10 +108,8 @@ abstract class Niadd : KeiSource() {
             return null
         }
 
-        val manga = SManga.create().apply {
-            this.url = "/${segments[0]}/${segments[1]}"
-        }
-        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+        val manga = SManga.create().apply { setUrlWithoutDomain(url.newBuilder().query(null).fragment(null).build().toString()) }
+        return getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
     }
 
     override suspend fun fetchMangaUpdate(
@@ -123,52 +117,63 @@ abstract class Niadd : KeiSource() {
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
-    ): SMangaUpdate {
-        val isOriginal = manga.url.startsWith("/original/")
-        return coroutineScope {
-            val details = async { if (fetchDetails) mangaDetailsParse(manga.url, isOriginal) else manga }
-            val chapterList = async { if (fetchChapters) parseChapterList(manga.url, isOriginal) else chapters }
-            SMangaUpdate(details.await(), chapterList.await())
-        }
+    ): SMangaUpdate = coroutineScope {
+        val details = async { if (fetchDetails) fetchDetails(manga) else manga }
+        val chapterList = async { if (fetchChapters) fetchChapterList(manga) else chapters }
+
+        SMangaUpdate(details.await(), chapterList.await())
     }
 
-    private suspend fun mangaDetailsParse(url: String, isOriginal: Boolean): SManga {
-        val document = client.get(baseUrl + url, Fetch.DOCUMENT).asJsoup()
+    private suspend fun fetchDetails(manga: SManga): SManga {
+        val document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
+        val info = document.selectFirst("div.bookside-bookinfo")
+        val released = document.selectFirst("div.bookside-general-cell:has([itemprop=datePublished])")
+
         return SManga.create().apply {
-            val info = document.selectFirst("div.manga-detail")!!
-            title = info.selectFirst("div.manga-detail-name")!!.text()
-            thumbnail_url = info.selectFirst("div.manga-detail-img img")?.absUrl("src")
-            author = info.selectFirst("a[href*=/search/?author=]")?.textOrNull()
-            artist = info.selectFirst("a[href*=/search/?artist=]")?.textOrNull()
-            genre = info.select("div.manga-detail-category a.category-name").joinToString { it.text() }
-            status = when (info.selectFirst("div.manga-detail-status a.status-name")?.textOrNull()?.lowercase()) {
+            url = manga.url
+            title = document.selectFirst("h1.book-headline-name")!!.text()
+            author = info?.select("a[href*=author=]")?.eachText()?.joinToString()?.ifEmpty { null }
+            artist = info?.select("a[href*=artist=]")?.eachText()?.joinToString()?.ifEmpty { null }
+            genre = document.select("div.bookside-general-cell [itemprop=genre]").eachText().joinToString().ifEmpty { null }
+            status = when (document.selectFirst("span.book-status")?.text()?.lowercase()?.removeSurrounding("(", ")")) {
                 in ONGOING_STATUSES -> SManga.ONGOING
                 in COMPLETED_STATUSES -> SManga.COMPLETED
                 else -> SManga.UNKNOWN
             }
-            val ratingText = info.selectFirst("div.manga-detail-rating")?.textOrNull()?.let { rating ->
-                val score = rating.substringBefore("/").toDoubleOrNull()
-                val votes = rating.substringAfter("ratings:").trim().toIntOrNull()
-                score?.let { "★ $it/5.0" }?.let { if (votes != null) "$it ($votes)" else it }
-            }
-            val desc = document.selectFirst("div.manga-detail-desc")?.textOrNull()
-            description = listOfNotNull(ratingText, desc).joinToString("\n\n").ifEmpty { null }
+            description = listOfNotNull(
+                document.selectFirst("div.bookside-big-rate")?.text()?.toDoubleOrNull()?.let {
+                    val votes = document.selectFirst("div.bookside-rate-vote span")?.text()?.toIntOrNull()
+                    if (votes != null) "★ $it/5 ($votes votos)" else "★ $it/5"
+                },
+                released?.selectFirst("span")?.text()?.removeSuffix(":")?.takeIf { it.isNotEmpty() }?.let { label ->
+                    released.selectFirst("[itemprop=datePublished]")?.text()?.let { "$label: $it" }
+                },
+                document.selectFirst("section.detail-synopsis:not(:has(a))")?.text(),
+                document.selectFirst("div.bookside-general-cell:not(:has(a, [itemprop]))")?.ownText()?.takeIf { it.isNotBlank() }?.let { "Nombres alternativos: $it" },
+            ).joinToString("\n\n").ifEmpty { null }
+            thumbnail_url = document.selectFirst("div.bookside-img img")?.absUrl("src")
         }
     }
 
-    private suspend fun parseChapterList(url: String, isOriginal: Boolean): List<SChapter> {
-        val chapters = if (isOriginal) {
-            val document = client.get(baseUrl + url, Fetch.DOCUMENT).asJsoup()
-            document.select("div.manga-chp-content a.manga-chp-item")
-        } else {
-            val mangaId = url.substringAfterLast("/").substringBefore(".").substringAfterLast("-")
-            val chapterUrl = "$baseUrl/manga/$mangaId/chapters".toHttpUrl().newBuilder()
-                .addQueryParameter("v", System.currentTimeMillis().toString())
-                .build()
-            client.get(chapterUrl, Fetch.DOCUMENT).asJsoup().select("a.chp-item")
+    override val supportsRelatedMangas get() = true
+
+    override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
+        .select("section.related-book-list div.bkslf-book-item")
+        .map { element ->
+            SManga.create().apply {
+                title = element.selectFirst("div.bkslf-book-name")!!.text()
+                setUrlWithoutDomain(element.selectFirst("a")!!.absUrl("href"))
+                thumbnail_url = element.selectFirst("img")?.absUrl("src")
+            }
         }
 
-        return chapters.map { element ->
+    private suspend fun fetchChapterList(manga: SManga): List<SChapter> {
+        val chaptersUrl = getMangaUrl(manga).removeSuffix(".html") + "/chapters.html"
+        // Sent as built: to requests that look like a browser the site serves /go/rds/ ad redirects instead of chapter links
+        val document = client.get(chaptersUrl, Fetch.NONE).asJsoup()
+        document.selectFirst("ul.chapter-list")!!
+        val isOriginal = manga.url.startsWith("/original/")
+        return document.select("ul.chapter-list a").map { element ->
             SChapter.create().apply {
                 setUrlWithoutDomain(element.absUrl("href"))
                 name = element.selectFirst("span.chp-title")!!.text()
@@ -180,11 +185,17 @@ abstract class Niadd : KeiSource() {
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = getChapterUrl(chapter)
-        val chapterId = chapterUrl.toHttpUrl().pathSegments[2].removeSuffix(".html")
+        val segments = chapterUrl.toHttpUrl().pathSegments
+        val chapterId = segments.lastOrNull { it.isNotEmpty() }
+            ?.removeSuffix(".html")
+            ?.removeSuffix("/")
+            ?: throw Exception(PAGES_NOT_FOUND)
         val url = readerJumpUrl().newBuilder().apply {
             setQueryParameter("cid", chapterId)
             // Users' original works have their own reader type in every language
-            if (chapter.memo["original"]?.booleanOrNull == true) setQueryParameter("type", "ogniadd")
+            if (chapter.memo["original"]?.booleanOrNull == true || chapterUrl.contains("/original/")) {
+                setQueryParameter("type", "ogniadd")
+            }
         }.build()
         val imageUrls = try {
             val html = client.get(url, Fetch.DOCUMENT.from(chapterUrl)).body.string()

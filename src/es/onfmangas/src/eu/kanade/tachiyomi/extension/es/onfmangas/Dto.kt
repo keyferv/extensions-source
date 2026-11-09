@@ -2,51 +2,37 @@ package eu.kanade.tachiyomi.extension.es.onfmangas
 
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
-import keiyoushi.utils.tryParseDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import org.jsoup.parser.Parser
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
-import java.util.Locale
-
-private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
 
 @Serializable
 class ChapterDto(
     private val url: String,
-    @SerialName("titulo_str") private val displayTitle: String? = null,
-    private val titulo: String? = null,
+    @SerialName("titulo_str") private val tituloStr: String? = null,
     private val numero: String? = null,
-    @SerialName("fecha_subida") val date: String? = null,
-    @SerialName("grupos_list") private val groups: List<GroupDto>? = null,
-    @SerialName("otras_versiones") private val otherVersions: List<ChapterDto>? = null,
+    @SerialName("fecha_subida") private val fechaSubida: String? = null,
+    @SerialName("grupos_list") private val gruposList: List<GroupDto>? = null,
+    @SerialName("otras_versiones") private val otrasVersiones: List<ChapterDto>? = null,
 ) {
+    val date: String? get() = fechaSubida
+
     val numberFloat: Float get() = numero?.toFloatOrNull() ?: 0f
 
-    fun toSChapters(onePerGroup: Boolean = false): List<SChapter> {
-        val versions = (listOf(this) + otherVersions.orEmpty()).map { it.toSChapter(this) }
-        return if (onePerGroup) versions.distinctBy { it.scanlator } else versions
+    fun toSChapter(parent: ChapterDto? = null) = SChapter.create().apply {
+        val num = this@ChapterDto.numero ?: parent?.numero
+        val title = this@ChapterDto.tituloStr ?: parent?.tituloStr
+        this.url = this@ChapterDto.url
+        this.name = when {
+            num != null && title != null -> "Capítulo $num: $title"
+            num != null -> "Capítulo $num"
+            title != null -> title
+            else -> "Capítulo sin número"
+        }
+        this.chapter_number = this@ChapterDto.numberFloat
+        this.scanlator = this@ChapterDto.gruposList?.joinToString(" & ") { it.nombre }
     }
 
-    private fun toSChapter(parent: ChapterDto) = SChapter.create().apply {
-        url = this@ChapterDto.url
-        name = chapterName(parent)
-        chapter_number = numberFloat
-        date_upload = dateFormat.tryParseDateTime(date, ZoneOffset.UTC)
-        scanlator = groups?.joinToString(" & ") { it.nombre }?.ifEmpty { null }
-    }
-
-    private fun chapterName(parent: ChapterDto): String {
-        val number = "Capítulo ${numberFloat.toString().removeSuffix(".0")}"
-        val title = listOf(displayTitle, titulo, parent.displayTitle)
-            .firstOrNull { !it.isNullOrBlank() }
-            ?.let { Parser.unescapeEntities(it, false).trim() }
-            ?: return number
-        val lowerTitle = title.lowercase()
-        return if ("cap" in lowerTitle || "ch." in lowerTitle) title else "$number: $title"
-    }
+    fun getOtherVersions() = otrasVersiones
 }
 
 @Serializable
@@ -55,19 +41,22 @@ class GroupDto(
 )
 
 @Serializable
-class GenreDto(
-    val id: String,
-    val name: String,
+class ReaderPagesDto(
+    val pages: List<PageDto>,
 )
 
 @Serializable
 class PageDto(
-    private val src: String,
-    private val fallback: String? = null,
+    val src: String,
+    val fallback: String? = null,
 ) {
-    fun toPage(index: Int, chapterUrl: String) = Page(
-        index = index,
-        url = chapterUrl,
-        imageUrl = chapterUrl.toHttpUrl().resolve(src)?.toString() ?: src,
-    )
+    fun toPage(index: Int, chapterUrl: String = ""): Page {
+        val resolvedUrl = when {
+            src.contains("mangadex") && !fallback.isNullOrBlank() -> fallback
+            !fallback.isNullOrBlank() -> fallback
+            else -> src
+        }
+        val fullUrl = if (resolvedUrl.startsWith("http")) resolvedUrl else "https://onfmangas.com$resolvedUrl"
+        return Page(index, url = chapterUrl, imageUrl = fullUrl)
+    }
 }
