@@ -1,8 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.aquellosquetraducen
 
-import androidx.preference.EditTextPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.source.ConfigurableSource
+import android.icu.text.Collator
+import android.icu.text.RuleBasedCollator
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -10,66 +9,65 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.firstInstance
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
-import kotlinx.serialization.Serializable
+import keiyoushi.utils.toJsonElement
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import kotlin.time.Instant
+import java.text.Normalizer
+import java.util.Locale
 
 @Source
-abstract class AquellosQueTraducen :
-    KeiSource(),
-    ConfigurableSource {
+abstract class AquellosQueTraducen : KeiSource() {
 
-    private val firebaseProjectId = "aquellosquetraducen-40706"
-    private val preferences by getPreferencesLazy()
+    override val supportsLatest = false
 
-    private val driveApiKey: String
-        get() = preferences.getString(DRIVE_API_KEY_PREF, "").orEmpty().trim()
+    override val supportsFilterFetching = true
 
-    @Volatile
-    private var cachedDriveApiKey: String? = null
+    override suspend fun getPopularManga(page: Int): MangasPage = MangasPage(fetchWorks().map { it.toSManga() }, false)
 
-    private fun buildMangaFromFirestore(doc: FirestoreDocument): SManga? {
-        val fields = doc.fields ?: return null
-        val titulo = fields.titulo?.stringValue ?: return null
-        val docId = doc.name?.substringAfterLast("/") ?: return null
-        return SManga.create().apply {
-            title = titulo
-            url = docId
-            thumbnail_url = fields.portadaURL?.stringValue?.let { optimizeCoverUrl(it) }
-            description = fields.sinopsis?.stringValue ?: ""
-            genre = fields.generos?.values?.joinToString { it.stringValue.orEmpty() }.orEmpty()
-            status = parseStatus(fields.estado?.stringValue)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val types = filters.firstInstance<TypeFilter>().selected
+        val selectedGenres = filters.firstInstanceOrNull<GenreFilter>()?.selected.orEmpty()
+        val statuses = filters.firstInstance<StatusFilter>().selected
+        val search = query.trim().foldAccents()
+        val works = fetchWorks().filter { work ->
+            work.title.foldAccents().contains(search) &&
+                (types.isEmpty() || work.type in types) &&
+                (selectedGenres.isEmpty() || work.genres.any { genre -> selectedGenres.any { it.equals(genre, ignoreCase = true) } }) &&
+                (statuses.isEmpty() || work.status in statuses)
         }
+        return MangasPage(works.map { it.toSManga() }, false)
     }
-
-    private suspend fun fetchCatalog(): MangasPage {
-        val url = "https://firestore.googleapis.com/v1/projects/$firebaseProjectId/databases/(default)/documents/obras".toHttpUrl()
-        val firestoreResponse = client.get(url).parseAs<FirestoreResponse>()
-        val works = firestoreResponse.documents.mapNotNull { buildMangaFromFirestore(it) }
-        return MangasPage(works, false)
-    }
-
-    override suspend fun getPopularManga(page: Int): MangasPage = fetchCatalog()
-
-    override suspend fun getLatestUpdates(page: Int): MangasPage = fetchCatalog()
-
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = fetchCatalog()
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
         if (url.host != baseUrl.toHttpUrl().host) return null
-        if (url.pathSegments.lastOrNull() != "obra.html") return null
-        val id = url.queryParameter("id")?.takeIf { it.isNotBlank() } ?: return null
-        val doc = client.get("https://firestore.googleapis.com/v1/projects/$firebaseProjectId/databases/(default)/documents/obras/$id".toHttpUrl()).parseAs<FirestoreDocument>()
-        return buildMangaFromFirestore(doc)
+        val id = when (url.pathSegments.singleOrNull()) {
+            "obra.html" -> url.queryParameter("id")
+            "lector.html" -> url.queryParameter("obra")
+            else -> null
+        }?.takeIf { it.isNotBlank() } ?: return null
+        return fetchWork(id).takeUnless { it.isNovel }?.toSManga()
     }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/obra.html?id=${manga.url}"
+    override fun getMangaUrl(manga: SManga): String = if (manga.url.startsWith("/")) {
+        "$baseUrl${manga.url}"
+    } else {
+        "$baseUrl/obra.html?id=${manga.url}"
+    }
+
+    override fun getChapterUrl(chapter: SChapter): String = if (chapter.url.startsWith("/")) {
+        "$baseUrl${chapter.url}"
+    } else {
+        "$baseUrl/lector.html?cap=${chapter.url}"
+    }
 
     override suspend fun fetchMangaUpdate(
         manga: SManga,
@@ -77,156 +75,90 @@ abstract class AquellosQueTraducen :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val doc = client.get("https://firestore.googleapis.com/v1/projects/$firebaseProjectId/databases/(default)/documents/obras/${manga.url}".toHttpUrl()).parseAs<FirestoreDocument>()
-        val updatedManga = if (fetchDetails) parseMangaDetails(doc) else manga
-        val updatedChapters = if (fetchChapters) fetchChapterList(doc) else chapters
-        return SMangaUpdate(updatedManga, updatedChapters)
+        val rawId = manga.url.substringAfter("id=").substringBefore("&").removePrefix("/")
+        val work = fetchWork(rawId)
+        return SMangaUpdate(
+            work.toSManga(),
+            if (fetchChapters) fetchChapterList(work) else chapters,
+        )
     }
 
-    private fun parseMangaDetails(doc: FirestoreDocument): SManga {
-        val fields = doc.fields ?: throw Exception("No se encontraron datos")
-
-        return SManga.create().apply {
-            title = fields.titulo?.stringValue ?: throw Exception("Título no encontrado")
-            author = "Desconocido"
-            thumbnail_url = fields.portadaURL?.stringValue?.let { optimizeCoverUrl(it) }
-            description = fields.sinopsis?.stringValue ?: ""
-            genre = fields.generos?.values?.joinToString { it.stringValue.orEmpty() }.orEmpty()
-            status = parseStatus(fields.estado?.stringValue)
-        }
-    }
-
-    private fun parseStatus(status: String?): Int = when (status?.lowercase()) {
-        "emision" -> SManga.ONGOING
-        "finalizado" -> SManga.COMPLETED
-        "pausa" -> SManga.ON_HIATUS
-        else -> SManga.UNKNOWN
-    }
-
-    private suspend fun fetchChapterList(doc: FirestoreDocument): List<SChapter> {
-        val fields = doc.fields ?: return emptyList()
-        val driveFolderId = fields.driveFolderId?.stringValue ?: return emptyList()
-        val driveApiKey = requireDriveApiKey()
-
-        val driveUrl = "https://www.googleapis.com/drive/v3/files?q='$driveFolderId'+in+parents+and+trashed=false&fields=files(id,name,createdTime)&key=$driveApiKey&pageSize=1000&orderBy=name".toHttpUrl()
-        val driveData = client.get(driveUrl).parseAs<DriveResponse>()
-
-        return driveData.files
-            .sortedWith(
-                compareByDescending<DriveFile> { it.name.extractChapterNumber() ?: -1f }
-                    .thenByDescending { it.name },
-            )
-            .map { folder ->
-                SChapter.create().apply {
-                    name = "Capítulo ${folder.name}"
-                    url = folder.id
-                    date_upload = folder.createdTime?.let { Instant.tryParse(it) } ?: 0L
-                    chapter_number = folder.name.extractChapterNumber() ?: -1f
-                }
-            }
-    }
-
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/lector.html?cap=${chapter.url}"
-
-    private fun String.extractChapterNumber(): Float? {
-        val cleaned = this.replace(",", ".")
-            .replace("[^0-9.]".toRegex(), "")
-        return cleaned.toFloatOrNull()
+    private suspend fun fetchChapterList(work: WorkDto): List<SChapter> {
+        val folderId = work.folderId ?: return emptyList()
+        return listFiles("'$folderId' in parents and mimeType = '$FOLDER_MIME_TYPE' and trashed = false", "files(id,name,createdTime)")
+            .sortedWith(compareByDescending(nameOrder) { it.name })
+            .map { it.toSChapter(work.id) }
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val driveApiKey = requireDriveApiKey()
-        val url = "https://www.googleapis.com/drive/v3/files?q='${chapter.url}'+in+parents+and+trashed=false&fields=files(id,name,mimeType)&key=$driveApiKey&orderBy=name".toHttpUrl()
-        val driveData = client.get(url).parseAs<DriveResponse>()
-
-        return driveData.files
-            .filter { it.mimeType?.startsWith("image/") == true }
-            .sortedBy { it.name }
-            .mapIndexed { index, file ->
-                Page(index, imageUrl = "https://drive.google.com/uc?export=view&id=${file.id}")
-            }
+        val folderId = chapter.url.substringAfter("cap=").substringBefore("&").removePrefix("/")
+        return listFiles("'$folderId' in parents and mimeType contains 'image/' and trashed = false", "files(id,name)")
+            .sortedWith(compareBy(nameOrder) { it.name })
+            .mapIndexed { index, file -> Page(index, imageUrl = driveImageUrl(file.id)) }
     }
 
-    private suspend fun requireDriveApiKey(): String {
-        val key = driveApiKey.ifBlank { cachedDriveApiKey.orEmpty() }.ifBlank { fetchDriveApiKeyFromSite() }
-        if (key.isBlank()) {
-            throw Exception("Google Drive API key not found on the site. Configure one in the source settings")
-        }
-        return key
+    override suspend fun fetchFilterData(): JsonElement = fetchWorks()
+        .flatMap { it.genres }
+        .distinctBy { it.lowercase() }
+        .sortedWith(nameOrder)
+        .toJsonElement()
+
+    override fun getFilterList(data: JsonElement?) = FilterList(
+        listOfNotNull(
+            TypeFilter(),
+            data?.parseAs<List<String>>()?.takeIf { it.isNotEmpty() }?.let(::GenreFilter),
+            StatusFilter(),
+        ),
+    )
+
+    // The catalogue is a single Firestore collection, ordered like the site's popular list: most liked first
+    private suspend fun fetchWorks(): List<WorkDto> = buildList {
+        var pageToken: String? = null
+        do {
+            val url = "$FIRESTORE_URL/obras".toHttpUrl().newBuilder()
+                .addQueryParameter("key", FIREBASE_API_KEY)
+                .apply { pageToken?.let { addQueryParameter("pageToken", it) } }
+                .build()
+            val page = client.get(url, Fetch.XHR).parseAs<WorksDto>()
+            addAll(page.documents)
+            pageToken = page.nextPageToken
+        } while (pageToken != null)
+    }.filterNot { it.isNovel }
+        .sortedWith(compareByDescending<WorkDto> { it.likes }.thenBy(nameOrder) { it.title })
+
+    private suspend fun fetchWork(id: String): WorkDto {
+        val url = "$FIRESTORE_URL/obras".toHttpUrl().newBuilder()
+            .addPathSegment(id)
+            .addQueryParameter("key", FIREBASE_API_KEY)
+            .build()
+        return client.get(url, Fetch.XHR).parseAs()
     }
 
-    private suspend fun fetchDriveApiKeyFromSite(): String {
-        val body = client.get(baseUrl).use { it.body.string() }
-        return GOOGLE_API_KEY_REGEX.find(body)?.value.orEmpty()
-            .also { key -> cachedDriveApiKey = key.ifBlank { null } }
+    // Chapters are Drive folders and pages the image files in them, listed with the site's Drive API key
+    private suspend fun listFiles(query: String, fields: String): List<FileDto> {
+        val url = DRIVE_API_URL.toHttpUrl().newBuilder()
+            .addQueryParameter("q", query)
+            .addQueryParameter("fields", fields)
+            .addQueryParameter("pageSize", "1000")
+            .addQueryParameter("key", DRIVE_API_KEY)
+            .build()
+        return client.get(url, Fetch.XHR).parseAs<FilesDto>().files
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = DRIVE_API_KEY_PREF
-            title = "Google Drive API key override"
-            summary = "Optional. Leave empty to use the public key exposed by the site at runtime."
-            dialogTitle = "Google Drive API key override"
-            setDefaultValue("")
-        }.also(screen::addPreference)
-    }
-
-    private fun optimizeCoverUrl(url: String): String {
-        val regex = Regex("[-\\w]{25,}")
-        val match = regex.find(url)
-        return if (match != null) {
-            "https://drive.google.com/thumbnail?id=${match.value}&sz=w600"
-        } else {
-            url
-        }
-    }
+    private fun String.foldAccents() = Normalizer.normalize(this, Normalizer.Form.NFD).replace(diacriticsRegex, "").lowercase()
 
     companion object {
-        private const val DRIVE_API_KEY_PREF = "driveApiKey"
-        private val GOOGLE_API_KEY_REGEX = Regex("AIza[0-9A-Za-z_-]{35}")
+        private const val FIRESTORE_URL = "https://firestore.googleapis.com/v1/projects/aquellosquetraducen-40706/databases/(default)/documents"
+        private const val FIREBASE_API_KEY = "AIzaSyCOL_GtBxev3zWFf2wKHppkCeO60EElMnM"
+        private const val DRIVE_API_URL = "https://www.googleapis.com/drive/v3/files"
+        private const val DRIVE_API_KEY = "AIzaSyAJQ2iPO6fJKzBqsfQ81N9pm9Brr4L_rOU"
+        private const val FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+        private val diacriticsRegex = Regex("""\p{Mn}+""")
+
+        // The site sorts names like the browser's localeCompare with { numeric: true, sensitivity: "base" }
+        private val nameOrder: Collator = (Collator.getInstance(Locale.ROOT) as RuleBasedCollator).apply {
+            strength = Collator.PRIMARY
+            numericCollation = true
+        }.freeze()
     }
-
-    @Serializable
-    class FirestoreResponse(
-        val documents: List<FirestoreDocument> = emptyList(),
-    )
-
-    @Serializable
-    class FirestoreDocument(
-        val name: String? = null,
-        val fields: WorkFields? = null,
-    )
-
-    @Serializable
-    class WorkFields(
-        val titulo: FieldValue? = null,
-        val portadaURL: FieldValue? = null,
-        val sinopsis: FieldValue? = null,
-        val estado: FieldValue? = null,
-        val generos: ArrayFieldValue? = null,
-        val driveFolderId: FieldValue? = null,
-    )
-
-    @Serializable
-    class FieldValue(
-        val stringValue: String? = null,
-    )
-
-    @Serializable
-    class ArrayFieldValue(
-        val values: List<FieldValue> = emptyList(),
-    )
-
-    @Serializable
-    class DriveResponse(
-        val files: List<DriveFile> = emptyList(),
-    )
-
-    @Serializable
-    class DriveFile(
-        val id: String = "",
-        val name: String = "",
-        val createdTime: String? = null,
-        val mimeType: String? = null,
-    )
 }

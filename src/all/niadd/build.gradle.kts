@@ -6,23 +6,19 @@ plugins {
 
 keiyoushi {
     name = "Niadd"
-    versionCode = 7
+    versionCode = 8
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
-    val subdomains = mapOf(
-        "pt-BR" to "br",
-        "en" to "www",
-        "es" to "es",
-        "it" to "it",
-        "ru" to "ru",
-        "de" to "de",
-        "fr" to "fr",
-    )
-    subdomains.forEach { (langCode, sub) ->
+    source {
+        lang = "all"
+        baseUrl = "https://www.niadd.com"
+
         source {
-            lang = langCode
-            baseUrl = "https://$sub.niadd.com"
+            name = "Niadd (ES)"
+            lang = "es"
+            baseUrl = "https://es.niadd.com"
+            id = 2697843818318465608L
         }
     }
     deeplink {

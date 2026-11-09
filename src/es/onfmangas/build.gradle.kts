@@ -6,12 +6,18 @@ plugins {
 
 keiyoushi {
     name = "ONF MANGAS"
-    versionCode = 9
+    versionCode = 11
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
     source {
         lang = "es"
         baseUrl = "https://onfmangas.com"
+    }
+
+    deeplink {
+        host("onfmangas.com")
+        host("www.onfmangas.com")
+        path("/manga/..*")
     }
 }

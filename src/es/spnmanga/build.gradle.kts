@@ -6,8 +6,8 @@ plugins {
 
 keiyoushi {
     name = "SpnManga"
-    versionCode = 2
-    contentWarning = ContentWarning.SAFE
+    versionCode = 3
+    contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
     source {
@@ -17,5 +17,6 @@ keiyoushi {
 
     deeplink {
         path("/..*")
+        path("/leer/..*")
     }
 }
