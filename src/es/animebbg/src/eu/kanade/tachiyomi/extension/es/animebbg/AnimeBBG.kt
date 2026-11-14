@@ -16,15 +16,19 @@ import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.NativeWebViewApi
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebViewBlocking
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Cookie
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.io.IOException
@@ -36,39 +40,60 @@ abstract class AnimeBBG : KeiSource() {
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Referer", "$baseUrl/")
 
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(::passBotCheck).rateLimit(2)
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder {
+        interceptors().removeAll { it.javaClass.simpleName == "CloudflareInterceptor" }
+        return addInterceptor(::passBotCheck).rateLimit(2)
+    }
 
     private val botCheckLock = Any()
+
+    private fun isChallengeResponse(response: Response, peek: String): Boolean {
+        if (response.code == 403 || response.code == 503) return true
+        return peek.contains("<title>Un momento", ignoreCase = true) ||
+            peek.contains("<title>One moment", ignoreCase = true) ||
+            peek.contains("<title>Just a moment", ignoreCase = true) ||
+            peek.contains("wsidchk") ||
+            peek.contains("throbber") ||
+            peek.contains("challenge-platform")
+    }
+
+    private fun syncCookies(url: HttpUrl = baseUrl.toHttpUrl()) {
+        val baseHttpUrl = baseUrl.toHttpUrl()
+        val rawCookies = CookieManager.getInstance().getCookie(url.toString())
+            ?: CookieManager.getInstance().getCookie(baseUrl)
+            ?: return
+        val cookies = rawCookies.split(';').mapNotNull {
+            Cookie.parse(baseHttpUrl, it.trim())
+        }
+        client.cookieJar.saveFromResponse(baseHttpUrl, cookies)
+        client.cookieJar.saveFromResponse(url, cookies)
+    }
 
     private fun passBotCheck(chain: Interceptor.Chain): Response {
         val request = chain.request()
 
-        // Sync cookies from Android's CookieManager to the request
-        val initialCookie = CookieManager.getInstance().getCookie(baseUrl)
-        val outgoingRequest = if (!initialCookie.isNullOrBlank()) {
-            request.newBuilder()
-                .header("Cookie", initialCookie)
-                .build()
-        } else {
-            request
-        }
-
-        val response = chain.proceed(outgoingRequest)
-        val peek = response.peekBody(2048).string()
-        val isChallenge = response.code == 403 ||
-            peek.contains("One moment, please") ||
-            peek.contains("wsidchk")
-
-        if (!isChallenge) {
+        syncCookies(request.url)
+        val response = chain.proceed(request)
+        val peek = response.peekBody(65536).string()
+        if (!isChallengeResponse(response, peek)) {
             return response
         }
         response.close()
 
         synchronized(botCheckLock) {
-            val appUserAgent = outgoingRequest.header("User-Agent")
-            val solved = runCatching {
+            // Check again if another concurrent thread already solved it
+            syncCookies(request.url)
+            val retry1 = chain.proceed(request)
+            val retry1Peek = retry1.peekBody(65536).string()
+            if (!isChallengeResponse(retry1, retry1Peek)) {
+                return retry1
+            }
+            retry1.close()
+
+            val appUserAgent = request.header("User-Agent")
+            val solvedHtml = runCatching {
                 @OptIn(NativeWebViewApi::class)
-                runWebViewBlocking<Unit>(chain.call(), timeout = 15.seconds) {
+                runWebViewBlocking<String>(chain.call(), timeout = 25.seconds) {
                     if (appUserAgent != null) {
                         userAgent = appUserAgent
                     }
@@ -84,30 +109,41 @@ abstract class AnimeBBG : KeiSource() {
                         )
                         wv.layout(0, 0, width, height)
                     }
-                    onPageStarted {
-                        if (hasBotCheckCookie()) resolve(Unit)
-                    }
                     onPageFinished {
                         poll(500.milliseconds) {
-                            if (hasBotCheckCookie()) resolve(Unit)
+                            evaluateJs("document.title") { titleJson ->
+                                val title = titleJson.trim('"', ' ', '\\')
+                                val isChallengeTitle = title.isEmpty() ||
+                                    title.startsWith("Un momento", ignoreCase = true) ||
+                                    title.startsWith("One moment", ignoreCase = true) ||
+                                    title.startsWith("Just a moment", ignoreCase = true)
+                                if (!isChallengeTitle && hasBotCheckCookie()) {
+                                    evaluateJs("document.documentElement.outerHTML") { htmlJson ->
+                                        resolve(htmlJson.parseAs<String>())
+                                    }
+                                }
+                            }
                         }
                     }
-                    loadUrl(baseUrl)
+                    loadUrl(request.url.toString())
                 }
-                true
-            }.getOrDefault(false)
+            }.getOrNull()
 
-            val freshCookies = CookieManager.getInstance().getCookie(baseUrl)
-            if (solved && !freshCookies.isNullOrBlank()) {
-                val retryRequest = request.newBuilder()
-                    .header("Cookie", freshCookies)
-                    .build()
-                val retried = chain.proceed(retryRequest)
-                val retriedPeek = retried.peekBody(2048).string()
-                if (retried.code != 403 && !retriedPeek.contains("One moment, please") && !retriedPeek.contains("wsidchk")) {
+            if (solvedHtml != null) {
+                syncCookies(request.url)
+                val retried = chain.proceed(request)
+                val retriedPeek = retried.peekBody(65536).string()
+                if (!isChallengeResponse(retried, retriedPeek)) {
                     return retried
                 }
                 retried.close()
+
+                val body = solvedHtml.toResponseBody("text/html; charset=utf-8".toMediaType())
+                return response.newBuilder()
+                    .code(200)
+                    .message("OK")
+                    .body(body)
+                    .build()
             }
 
             throw IOException(
