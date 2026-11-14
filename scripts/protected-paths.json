@@ -124,6 +124,10 @@
     {
       "path": "src/es/hmanga",
       "note": "Local custom source for hmanga.asia"
+    },
+    {
+      "path": "src/es/kumanga",
+      "note": "Custom reader function-call un-obfuscator, decoy exclusion, and original ID"
     }
   ]
 }
