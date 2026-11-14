@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.es.animebbg
 
+import android.webkit.CookieManager
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -7,23 +8,90 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
+import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.runWebViewBlocking
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.io.IOException
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
 
 @Source
 abstract class AnimeBBG : KeiSource() {
 
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Referer", "$baseUrl/")
+
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(::passBotCheck).rateLimit(2)
+
+    private val botCheckLock = Any()
+
+    @Volatile
+    private var botCheckPassedAt = Instant.DISTANT_PAST
+
+    private fun passBotCheck(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val requestedAt = Clock.System.now()
+        val response = chain.proceed(request)
+        val peek = response.peekBody(1024).string()
+        if (!peek.contains("One moment, please") && !peek.contains("wsidchk")) {
+            return response
+        }
+        response.close()
+        synchronized(botCheckLock) {
+            if (botCheckPassedAt < requestedAt) {
+                val appUserAgent = request.header("User-Agent")
+                val staleCookie = botCheckCookie()
+                runCatching {
+                    runWebViewBlocking<Unit>(chain.call(), timeout = 25.seconds) {
+                        if (appUserAgent != null) {
+                            userAgent = appUserAgent
+                        }
+                        domStorageEnabled = true
+                        javaScriptEnabled = true
+                        onPageStarted {
+                            if (botCheckCookie().let { it != null && it != staleCookie }) resolve(Unit)
+                        }
+                        onPageFinished {
+                            poll(500.milliseconds) {
+                                if (botCheckCookie().let { it != null && it != staleCookie }) resolve(Unit)
+                            }
+                        }
+                        loadUrl(baseUrl)
+                    }
+                }.onFailure {
+                    throw IOException(
+                        "Verificación de seguridad en AnimeBBG. Abre la extensión en WebView para resolverla.",
+                        it,
+                    )
+                }
+                botCheckPassedAt = Clock.System.now()
+            }
+        }
+        return chain.proceed(request)
+    }
+
+    private fun botCheckCookie() = CookieManager.getInstance().getCookie(baseUrl)
+        ?.split("; ")
+        ?.firstOrNull { it.startsWith("$BOT_CHECK_COOKIE=") }
+
     // Popular (homepage ranking)
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val document = client.get(baseUrl).asJsoup()
+        val document = client.get(baseUrl, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
         return MangasPage(mangas, false)
     }
@@ -41,7 +109,7 @@ abstract class AnimeBBG : KeiSource() {
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = if (page > 1) "$baseUrl/whats-new/?page=$page" else "$baseUrl/whats-new/"
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select(latestUpdatesSelector()).map { latestUpdatesFromElement(it) }
         val hasNextPage = document.selectFirst(latestUpdatesNextPageSelector(page + 1)) != null
         return MangasPage(mangas, hasNextPage)
@@ -68,7 +136,7 @@ abstract class AnimeBBG : KeiSource() {
             .addQueryParameter("page", page.toString())
             .build()
 
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select(searchMangaSelector()).map { searchMangaFromElement(it) }
         val hasNextPage = document.selectFirst(searchMangaNextPageSelector(page + 1)) != null
         return MangasPage(mangas, hasNextPage)
@@ -101,7 +169,7 @@ abstract class AnimeBBG : KeiSource() {
     ): SMangaUpdate = coroutineScope {
         val updatedMangaAsync = async {
             if (fetchDetails) {
-                parseMangaDetails(client.get(getMangaUrl(manga)).asJsoup(), manga)
+                parseMangaDetails(client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup(), manga)
             } else {
                 manga
             }
@@ -132,7 +200,7 @@ abstract class AnimeBBG : KeiSource() {
     // Chapters
 
     private suspend fun fetchChapterList(manga: SManga): List<SChapter> {
-        var document = client.get(getMangaUrl(manga)).asJsoup()
+        var document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
 
         // Canonical path follows /comics/ -> /obras/ redirects; pagination reuses it.
         var mangaPath = document.location().substringAfter(baseUrl).substringBefore("?").removeSuffix("/")
@@ -148,7 +216,7 @@ abstract class AnimeBBG : KeiSource() {
             if (document.selectFirst(chapterNextPageSelector(page + 1)) == null) break
 
             page++
-            document = client.get(chapterListUrl(mangaPath, page)).asJsoup()
+            document = client.get(chapterListUrl(mangaPath, page), Fetch.DOCUMENT).asJsoup()
         }
 
         return chapters
@@ -175,7 +243,7 @@ abstract class AnimeBBG : KeiSource() {
     // Pages
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(getChapterUrl(chapter)).asJsoup()
+        val document = client.get(getChapterUrl(chapter), Fetch.DOCUMENT).asJsoup()
         return pageListParse(document)
     }
 
@@ -231,5 +299,9 @@ abstract class AnimeBBG : KeiSource() {
     private fun isLockedReader(document: Document): Boolean {
         if (document.title().contains("bloqueado", ignoreCase = true)) return true
         return document.body().text().contains("CAPÍTULO DE PAGO", ignoreCase = true)
+    }
+
+    companion object {
+        private const val BOT_CHECK_COOKIE = "wssplashchk"
     }
 }
