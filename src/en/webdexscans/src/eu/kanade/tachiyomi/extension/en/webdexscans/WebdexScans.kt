@@ -33,8 +33,8 @@ abstract class WebdexScans :
 
     private val preferences by getPreferencesLazy()
 
-    private val supabaseUrl = "https://nrqghtbdrdnoywxjkgkf.supabase.co/rest/v1"
-    private val supabaseApiKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ycWdodGJkcmRub3l3eGprZ2tmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4Njg4NDEsImV4cCI6MjA5MjQ0NDg0MX0.Gnrn33_LMxFA9m_OdCpybBZ-Cjcc5rdsJlD8Y9eOICg"
+    private val supabaseUrl = "https://apidb.webdexscans.com/rest/v1"
+    private val supabaseApiKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzkyMzI5NzkxLCJleHAiOjE5NTAwMDk3OTF9.ub3n4yzBgZ1madOiy7R_QE5yOLRJISh8-C_wa0Ud8mQ"
 
     private val supabaseHeaders: Headers
         get() = headersBuilder()
@@ -50,6 +50,7 @@ abstract class WebdexScans :
         val url = "$supabaseUrl/series".toHttpUrl().newBuilder()
             .addQueryParameter("select", "id,title,slug,cover_url")
             .addQueryParameter("order", "view_count.desc")
+            .addQueryParameter("status", "neq.draft")
             .addQueryParameter("offset", offset.toString())
             .addQueryParameter("limit", "24")
             .build()
@@ -65,15 +66,20 @@ abstract class WebdexScans :
     // ============================== Latest ===============================
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val offset = (page - 1) * 24
         val url = "$supabaseUrl/series".toHttpUrl().newBuilder()
-            .addQueryParameter("select", "id,title,slug,cover_url")
-            .addQueryParameter("order", "updated_at.desc")
-            .addQueryParameter("offset", offset.toString())
-            .addQueryParameter("limit", "24")
+            .addQueryParameter("select", "id,title,slug,cover_url,chapters(created_at)")
+            .addQueryParameter("chapters.order", "created_at.desc")
+            .addQueryParameter("chapters.limit", "1")
+            .addQueryParameter("status", "neq.draft")
             .build()
 
-        return mangaListParse(client.get(url, supabaseHeaders, Fetch.XHR))
+        // The site orders Latest by newest chapter, but PostgREST cannot order a to-many
+        // embed (PGRST118), so the whole series list is sorted and paged here.
+        val sorted = client.get(url, supabaseHeaders, Fetch.XHR).parseAs<List<SearchSeriesDto>>()
+            .sortedByDescending { it.latestChapterTimestamp }
+        val offset = (page - 1) * 24
+        val pageItems = sorted.drop(offset).take(24)
+        return MangasPage(pageItems.map { it.toSManga(baseUrl) }, offset + pageItems.size < sorted.size)
     }
 
     // ============================== Search ===============================
@@ -101,6 +107,8 @@ abstract class WebdexScans :
         filters.firstInstanceOrNull<StatusFilter>()?.selected?.let {
             url.addQueryParameter("status", "eq.$it")
         }
+
+        url.addQueryParameter("status", "neq.draft")
 
         when (filters.firstInstanceOrNull<SortFilter>()?.selected) {
             "popular" -> url.addQueryParameter("order", "view_count.desc")
