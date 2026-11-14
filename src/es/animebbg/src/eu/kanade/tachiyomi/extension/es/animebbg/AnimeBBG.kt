@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.animebbg
 
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -12,6 +14,7 @@ import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.NativeWebViewApi
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.runWebViewBlocking
 import kotlinx.coroutines.async
@@ -25,10 +28,8 @@ import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.io.IOException
-import kotlin.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.Instant
 
 @Source
 abstract class AnimeBBG : KeiSource() {
@@ -39,54 +40,86 @@ abstract class AnimeBBG : KeiSource() {
 
     private val botCheckLock = Any()
 
-    @Volatile
-    private var botCheckPassedAt = Instant.DISTANT_PAST
-
     private fun passBotCheck(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val requestedAt = Clock.System.now()
-        val response = chain.proceed(request)
-        val peek = response.peekBody(1024).string()
-        if (!peek.contains("One moment, please") && !peek.contains("wsidchk")) {
+
+        // Sync cookies from Android's CookieManager to the request
+        val initialCookie = CookieManager.getInstance().getCookie(baseUrl)
+        val outgoingRequest = if (!initialCookie.isNullOrBlank()) {
+            request.newBuilder()
+                .header("Cookie", initialCookie)
+                .build()
+        } else {
+            request
+        }
+
+        val response = chain.proceed(outgoingRequest)
+        val peek = response.peekBody(2048).string()
+        val isChallenge = response.code == 403 ||
+            peek.contains("One moment, please") ||
+            peek.contains("wsidchk")
+
+        if (!isChallenge) {
             return response
         }
         response.close()
+
         synchronized(botCheckLock) {
-            if (botCheckPassedAt < requestedAt) {
-                val appUserAgent = request.header("User-Agent")
-                val staleCookie = botCheckCookie()
-                runCatching {
-                    runWebViewBlocking<Unit>(chain.call(), timeout = 25.seconds) {
-                        if (appUserAgent != null) {
-                            userAgent = appUserAgent
-                        }
-                        domStorageEnabled = true
-                        javaScriptEnabled = true
-                        onPageStarted {
-                            if (botCheckCookie().let { it != null && it != staleCookie }) resolve(Unit)
-                        }
-                        onPageFinished {
-                            poll(500.milliseconds) {
-                                if (botCheckCookie().let { it != null && it != staleCookie }) resolve(Unit)
-                            }
-                        }
-                        loadUrl(baseUrl)
+            val appUserAgent = outgoingRequest.header("User-Agent")
+            val solved = runCatching {
+                @OptIn(NativeWebViewApi::class)
+                runWebViewBlocking<Unit>(chain.call(), timeout = 15.seconds) {
+                    if (appUserAgent != null) {
+                        userAgent = appUserAgent
                     }
-                }.onFailure {
-                    throw IOException(
-                        "Verificación de seguridad en AnimeBBG. Abre la extensión en WebView para resolverla.",
-                        it,
-                    )
+                    domStorageEnabled = true
+                    javaScriptEnabled = true
+                    withNativeWebView { wv ->
+                        val width = 1080
+                        val height = 1920
+                        wv.layoutParams = ViewGroup.LayoutParams(width, height)
+                        wv.measure(
+                            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
+                        )
+                        wv.layout(0, 0, width, height)
+                    }
+                    onPageStarted {
+                        if (hasBotCheckCookie()) resolve(Unit)
+                    }
+                    onPageFinished {
+                        poll(500.milliseconds) {
+                            if (hasBotCheckCookie()) resolve(Unit)
+                        }
+                    }
+                    loadUrl(baseUrl)
                 }
-                botCheckPassedAt = Clock.System.now()
+                true
+            }.getOrDefault(false)
+
+            val freshCookies = CookieManager.getInstance().getCookie(baseUrl)
+            if (solved && !freshCookies.isNullOrBlank()) {
+                val retryRequest = request.newBuilder()
+                    .header("Cookie", freshCookies)
+                    .build()
+                val retried = chain.proceed(retryRequest)
+                val retriedPeek = retried.peekBody(2048).string()
+                if (retried.code != 403 && !retriedPeek.contains("One moment, please") && !retriedPeek.contains("wsidchk")) {
+                    return retried
+                }
+                retried.close()
             }
+
+            throw IOException(
+                "Verificación de seguridad en AnimeBBG. Abre la extensión en WebView (ícono del globo) para resolverla.",
+            )
         }
-        return chain.proceed(request)
     }
 
-    private fun botCheckCookie() = CookieManager.getInstance().getCookie(baseUrl)
-        ?.split("; ")
-        ?.firstOrNull { it.startsWith("$BOT_CHECK_COOKIE=") }
+    private fun hasBotCheckCookie(): Boolean {
+        val cookies = CookieManager.getInstance().getCookie(baseUrl) ?: return false
+        return cookies.contains("$BOT_CHECK_COOKIE=") || cookies.contains("cf_clearance=")
+    }
 
     // Popular (catalog sorted by rating/popularity)
 

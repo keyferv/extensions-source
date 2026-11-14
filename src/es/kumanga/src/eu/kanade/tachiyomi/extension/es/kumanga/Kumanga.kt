@@ -21,6 +21,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
+import java.io.IOException
 
 @Source
 abstract class Kumanga : KeiSource() {
@@ -144,13 +145,46 @@ abstract class Kumanga : KeiSource() {
                 .toString()
         }
         val document = client.get(readerUrl, Fetch.DOCUMENT).asJsoup()
-        // Decoy page lists are declared inside blocks, out of the reader's scope
-        val scripts = document.select("script").joinToString("\n") { it.data().withoutBlocks() }
-        val name = RPICS_REGEX.find(scripts)!!.groupValues[1]
-        val encoded = STRING_CONST_REGEX.findAll(scripts).first { it.groupValues[1] == name }.groupValues[2]
-        val paths = Base64.decode(encoded, Base64.DEFAULT).xor(PAGES_KEY).decodeToString().parseAs<List<String>>()
+        val scripts = document.select("script").joinToString("\n") { it.data() }
+        val pages = extractPages(scripts)
         val base = readerUrl.toHttpUrl()
-        return paths.mapIndexed { index, path -> Page(index, imageUrl = base.resolve(path)!!.toString()) }
+        return pages.mapIndexed { index, path -> Page(index, imageUrl = base.resolve(path)!!.toString()) }
+    }
+
+    private fun extractPages(scripts: String): List<String> {
+        val candidates = mutableListOf<String>()
+
+        for (match in RPICS_REGEX.findAll(scripts)) {
+            val direct = match.groups[3]?.value
+            val variable = match.groups[2]?.value
+            val function = match.groups[1]?.value
+            if (!direct.isNullOrEmpty()) {
+                candidates.add(direct)
+            } else if (!variable.isNullOrEmpty()) {
+                val varRegex = Regex("""const\s+${Regex.escape(variable)}\s*=\s*"([^"]+)"""")
+                varRegex.find(scripts)?.groupValues?.get(1)?.let(candidates::add)
+            } else if (!function.isNullOrEmpty()) {
+                val funcRegex = Regex("""function\s+${Regex.escape(function)}\s*\(\)\s*\{[^}]*return\s*"([^"]+)"""")
+                funcRegex.find(scripts)?.groupValues?.get(1)?.let(candidates::add)
+            }
+        }
+
+        JAJA_REGEX.find(scripts)?.groupValues?.get(1)?.let(candidates::add)
+
+        for (candidate in candidates) {
+            val decoded = runCatching {
+                Base64.decode(candidate, Base64.DEFAULT)
+                    .xor(PAGES_KEY)
+                    .decodeToString()
+                    .parseAs<List<String>>()
+            }.getOrNull() ?: continue
+
+            if (decoded.any { it.contains("memedroid") || it.contains("imgur.com") }) {
+                continue
+            }
+            return decoded
+        }
+        throw IOException("No se pudieron obtener las páginas del capítulo")
     }
 
     override fun getFilterList(data: JsonElement?) = FilterList(
@@ -161,17 +195,11 @@ abstract class Kumanga : KeiSource() {
 
     private fun String.toMangaId() = "$baseUrl$this".toHttpUrl().pathSegments[1].toInt()
 
-    private tailrec fun String.withoutBlocks(): String {
-        val outer = BLOCK_REGEX.replace(this, "")
-        return if (outer == this) this else outer.withoutBlocks()
-    }
-
     companion object {
         // XOR key from the site's kx.reader.js
         private val PAGES_KEY = "Jr54VwepF4La".toByteArray()
         private val OTHER_CHAPTERS_REGEX = Regex("""OTHER_CHAPTERS\s*=\s*(\[.*])\s*;""", RegexOption.DOT_MATCHES_ALL)
-        private val RPICS_REGEX = Regex("""const\s+rpics\s*=\s*(\w+)\s*;""")
-        private val STRING_CONST_REGEX = Regex("""const\s+(\w+)\s*=\s*"([^"]*)"""")
-        private val BLOCK_REGEX = Regex("""\{[^{}]*\}""")
+        private val RPICS_REGEX = Regex("""const\s+rpics\s*=\s*(?:(\w+)\(\)|(\w+)|"([^"]*)")\s*;""")
+        private val JAJA_REGEX = Regex("""const\s+jaja\s*=\s*"([^"]+)"""")
     }
 }
