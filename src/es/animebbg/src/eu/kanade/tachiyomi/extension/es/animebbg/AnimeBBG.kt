@@ -88,21 +88,30 @@ abstract class AnimeBBG : KeiSource() {
         ?.split("; ")
         ?.firstOrNull { it.startsWith("$BOT_CHECK_COOKIE=") }
 
-    // Popular (homepage ranking)
+    // Popular (catalog sorted by rating/popularity)
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val document = client.get(baseUrl, Fetch.DOCUMENT).asJsoup()
+        val url = if (page > 1) "$baseUrl/obras/?order=rating&page=$page" else "$baseUrl/obras/?order=rating"
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
-        return MangasPage(mangas, false)
+        val hasNextPage = document.selectFirst(popularNextPageSelector(page + 1)) != null
+        return MangasPage(mangas, hasNextPage)
     }
 
-    private fun popularMangaSelector(): String = "a.h2-rank-card, a.xcHomeV2-rankCard"
+    private fun popularMangaSelector(): String = "div.abbgBib-row, a.h2-rank-card, a.xcHomeV2-rankCard"
+
+    private fun popularNextPageSelector(nextPage: Int): String = "a[href*='page=$nextPage'], a.pageNav-jump--next"
 
     private fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
-        setUrlWithoutDomain(element.attr("abs:href"))
-        title = element.selectFirst(".h2-rank-title")?.text()
-            ?: element.selectFirst("strong")?.text() ?: ""
-        thumbnail_url = element.selectFirst("img")?.attr("abs:src")
+        val link = element.selectFirst("a.abbgBib-row-link, a.h2-rank-card, a")
+        setUrlWithoutDomain(link?.attr("abs:href") ?: element.attr("abs:href"))
+        title = element.selectFirst(".abbgBib-row-title a, .abbgBib-row-title, .h2-rank-title")?.text()
+            ?: link?.text()
+            ?: element.selectFirst("strong")?.text()
+            ?: ""
+        thumbnail_url = element.selectFirst("img")?.let { img ->
+            img.attr("abs:src").ifEmpty { img.attr("abs:data-src") }
+        }
     }
 
     // Latest
@@ -142,13 +151,17 @@ abstract class AnimeBBG : KeiSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    private fun searchMangaSelector(): String = ".search-comic"
+    private fun searchMangaSelector(): String = ".search-comic, .abbgBib-row"
 
     private fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
-        val link = element.selectFirst("h3.search-comic-title a.search-comic-link, h3.search-comic-title a, a.search-comic-link")
+        val link = element.selectFirst("h3.search-comic-title a.search-comic-link, h3.search-comic-title a, a.search-comic-link, a.abbgBib-row-link, a")
         setUrlWithoutDomain(link?.attr("abs:href").orEmpty())
-        title = link?.text() ?: ""
-        thumbnail_url = element.selectFirst("img")?.attr("abs:src")
+        title = element.selectFirst(".abbgBib-row-title a, .abbgBib-row-title, h3.search-comic-title")?.text()
+            ?: link?.text()
+            ?: ""
+        thumbnail_url = element.selectFirst("img")?.let { img ->
+            img.attr("abs:src").ifEmpty { img.attr("abs:data-src") }
+        }
     }
 
     private fun searchMangaNextPageSelector(nextPage: Int): String = "a[href*='?page=$nextPage'], a.pageNav-jump--next"
