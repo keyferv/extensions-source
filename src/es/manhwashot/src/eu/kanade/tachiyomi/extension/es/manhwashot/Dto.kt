@@ -21,8 +21,8 @@ class ChapterListDto(
 
 @Serializable
 class ReaderDto(
-    private val images: List<String>,
-    val locked: Boolean,
+    private val images: List<String> = emptyList(),
+    val locked: Boolean = false,
 ) {
     fun toPages() = images.mapIndexed { index, url -> Page(index, imageUrl = url) }
 }

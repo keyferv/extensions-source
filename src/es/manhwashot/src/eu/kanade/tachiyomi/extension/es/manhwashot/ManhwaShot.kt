@@ -106,29 +106,53 @@ abstract class ManhwaShot : KeiSource() {
         val rows = select(".chapters-grid a.ch-row")
         if (rows.isEmpty()) return emptyList()
         // The page shows relative dates only: the chapter list's data has the exact ones, and the lock levels
-        val data = extractNextJs<ChapterListDto>()!!
+        val data = extractNextJs<ChapterListDto>()
         return rows.map { row ->
             val href = row.absUrl("href")
             val number = href.trimEnd('/').substringAfterLast("capitulo-")
-            val title = row.selectFirst(".ch-num")!!.ownText()
+            val title = row.selectFirst(".ch-num")?.ownText() ?: "Capítulo $number"
             SChapter.create().apply {
                 setUrlWithoutDomain(href)
-                name = when (data.levelOf(number)) {
+                name = when (data?.levelOf(number)) {
                     null -> title
                     "vip" -> "🔒 $title (VIP)"
                     "pago" -> "🔒 $title (VIP de pago)"
                     else -> "🔒 $title"
                 }
                 chapter_number = number.toFloatOrNull() ?: -1f
-                date_upload = data.dateOf(number)
+                date_upload = data?.dateOf(number) ?: 0L
             }
         }
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val reader = client.get(getChapterUrl(chapter), rscHeaders, Fetch.XHR).extractNextJs<ReaderDto>()!!
-        if (reader.locked) return emptyList()
-        return reader.toPages()
+        val document = client.get(getChapterUrl(chapter), Fetch.DOCUMENT).asJsoup()
+
+        val images = document.select("img[src*=/img/WP-manga/data/], img[src*=img.manhwashot.lat/img/]")
+            .mapNotNull { img ->
+                val src = img.attr("abs:src")
+                if (src.contains("/img/WP-manga/data/") || src.contains("img.manhwashot.lat")) {
+                    src.substringBefore("?").ifEmpty { src }
+                } else {
+                    null
+                }
+            }
+            .distinct()
+
+        if (images.isNotEmpty()) {
+            return images.mapIndexed { index, url -> Page(index, imageUrl = url) }
+        }
+
+        val reader = runCatching {
+            client.get(getChapterUrl(chapter), rscHeaders, Fetch.XHR).extractNextJs<ReaderDto>()
+        }.getOrNull()
+
+        if (reader != null) {
+            if (reader.locked) return emptyList()
+            return reader.toPages()
+        }
+
+        return emptyList()
     }
 
     override val supportsFilterFetching = true
