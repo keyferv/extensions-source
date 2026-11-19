@@ -6,12 +6,22 @@ plugins {
 
 keiyoushi {
     name = "Komiwa"
-    versionCode = 3
+    versionCode = 4
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
     source {
         lang = "es"
         baseUrl = "https://www.komiwa.net"
+    }
+
+    deeplink {
+        host("www.komiwa.net")
+        host("komiwa.net")
+        path("/manga/..*")
+        path("/chapter/..*")
+        path("/genero/..*")
+        path("/tipo/..*")
+        path("/demografia/..*")
     }
 }

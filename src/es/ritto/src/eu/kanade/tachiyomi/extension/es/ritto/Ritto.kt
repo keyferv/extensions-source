@@ -10,14 +10,17 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.MarkdownDescription
 import keiyoushi.utils.asJsoup
-import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.tryParseDate
+import keiyoushi.utils.extractNextJs
+import keiyoushi.utils.textOrNull
 import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -26,8 +29,6 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Document
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 @Source
 abstract class Ritto : KeiSource() {
@@ -36,39 +37,76 @@ abstract class Ritto : KeiSource() {
         addInterceptor(::pdfPageInterceptor)
     }
 
-    override suspend fun getPopularManga(page: Int): MangasPage = catalogParse(client.get("$baseUrl/catalogo?busqueda=&tipo=&estado=&genero=&categoria=&orden=vistas&pagina=$page").asJsoup())
+    override suspend fun getPopularManga(page: Int) = getCatalog(page) { addQueryParameter("orden", "vistas") }
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = catalogParse(client.get("$baseUrl/catalogo?busqueda=&tipo=&estado=&genero=&categoria=&orden=reciente&pagina=$page").asJsoup())
+    override suspend fun getLatestUpdates(page: Int) = getCatalog(page) { addQueryParameter("orden", "reciente") }
 
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        val tipo = filters.firstInstanceOrNull<TypeFilter>()?.selectedValue ?: ""
-        val estado = filters.firstInstanceOrNull<StatusFilter>()?.selectedValue ?: ""
-        val genero = filters.firstInstanceOrNull<GenreFilter>()?.selectedValue ?: ""
-        val categoria = filters.firstInstanceOrNull<CategoryFilter>()?.selectedValue ?: ""
-        val orden = filters.firstInstanceOrNull<SortFilter>()?.selectedValue ?: "reciente"
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList) = getCatalog(page) {
+        if (query.isNotBlank()) addQueryParameter("busqueda", query.trim())
+        filters.filterIsInstance<UriPartFilter>().forEach { it.addTo(this) }
+    }
 
+    private suspend fun getCatalog(page: Int, parameters: HttpUrl.Builder.() -> Unit): MangasPage {
         val url = "$baseUrl/catalogo".toHttpUrl().newBuilder()
-            .addQueryParameter("busqueda", query)
-            .addQueryParameter("tipo", tipo)
-            .addQueryParameter("estado", estado)
-            .addQueryParameter("genero", genero)
-            .addQueryParameter("categoria", categoria)
-            .addQueryParameter("orden", orden)
+            .apply(parameters)
             .addQueryParameter("pagina", page.toString())
             .build()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
+        return MangasPage(document.workCards(), document.extractNextJs<PaginationDto>()?.hasNextPage() == true)
+    }
 
-        return catalogParse(client.get(url).asJsoup())
+    private fun Document.workCards() = select("a.ritto-work-card")
+        .filterNot { card -> card.select("span").any { it.ownText() == NOVEL } }
+        .map { card ->
+            SManga.create().apply {
+                setUrlWithoutDomain(card.absUrl("href"))
+                title = card.selectFirst("h3")!!.text()
+                thumbnail_url = card.selectFirst("img")?.absUrl("src")
+            }
+        }
+
+    override suspend fun getMangasByUrl(url: HttpUrl, page: Int): MangasPage {
+        if (url.host.removePrefix("www.") != baseUrl.toHttpUrl().host) return MangasPage(emptyList(), false)
+        return when (url.pathSegments.first()) {
+            "catalogo" -> getCatalog(page) {
+                url.queryParameterNames.filter { it != "pagina" && it != "vista" }.forEach { name ->
+                    url.queryParameterValues(name).forEach { addQueryParameter(name, it) }
+                }
+            }
+
+            "autor" -> MangasPage(client.get(url, Fetch.DOCUMENT).asJsoup().workCards(), false)
+
+            // A scan's page lists all its works at once
+            "scan" -> {
+                val mangas = client.get(url, Fetch.DOCUMENT).asJsoup().select("article.sx-work")
+                    .filterNot { it.selectFirst(".sx-work__badge")?.ownText() == NOVEL }
+                    .map { work ->
+                        SManga.create().apply {
+                            val link = work.selectFirst(".sx-work__title a")!!
+                            setUrlWithoutDomain(link.absUrl("href"))
+                            title = link.text()
+                            thumbnail_url = work.selectFirst("img")?.absUrl("src")
+                        }
+                    }
+                MangasPage(mangas, false)
+            }
+
+            else -> super.getMangasByUrl(url, page)
+        }
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.host != baseUrl.toHttpUrl().host) return null
-        if (url.pathSegments.getOrNull(0) != "obra") return null
-        val slug = url.pathSegments.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return null
-        val manga = SManga.create().apply { this.url = slug }
-        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+        val segments = url.pathSegments
+        if (segments.size < 2 || segments[0] != "obra") return null
+        val manga = SManga.create().apply { this.url = "/obra/${segments[1]}" }
+        val document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
+        // A missing work answers 200 with an "Obra no encontrada" page
+        if (document.selectFirst("h1.rf-hero__title") == null || document.type() == NOVEL) return null
+        return document.toSMangaDetails().apply {
+            this.url = manga.url
+            initialized = true
+        }
     }
-
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/obra/${manga.url}"
 
     override suspend fun fetchMangaUpdate(
         manga: SManga,
@@ -76,129 +114,41 @@ abstract class Ritto : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val url = getMangaUrl(manga)
-        val body = client.get(url).use { it.body.string() }
-        val document = org.jsoup.Jsoup.parse(body, url)
+        val document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
         return SMangaUpdate(
-            manga = parseMangaDetails(document, manga.url),
-            chapters = parseChapterList(body, document),
+            manga = document.toSMangaDetails(),
+            chapters = document.extractNextJs<List<ChapterDto>>().orEmpty().flatMap { it.toSChapters() },
         )
     }
 
-    private fun parseMangaDetails(document: Document, mangaUrl: String): SManga = SManga.create().apply {
-        url = mangaUrl
-        title = document.selectFirst("h1")?.text()
-            ?: throw Exception("Título no encontrado")
-        description = document.selectFirst("p.ref-obra-description")?.text()
-        thumbnail_url = document.selectFirst("img[src*=\"/covers/\"]")?.attr("abs:src")
-
-        val genreLinks = document.select("a[href*=\"/catalogo?genero=\"]")
-        genre = genreLinks.map { it.text() }.distinct().joinToString()
-
-        val statusLink = document.selectFirst("a[href*=\"/catalogo?estado=\"]")
-        val statusText = statusLink?.attr("href") ?: ""
-        status = when {
-            statusText.contains("EN_EMISION") -> SManga.ONGOING
-            statusText.contains("FINALIZADO") -> SManga.COMPLETED
-            statusText.contains("PAUSADO") -> SManga.ON_HIATUS
-            statusText.contains("CANCELADO") -> SManga.CANCELLED
+    private fun Document.toSMangaDetails() = SManga.create().apply {
+        title = selectFirst("h1.rf-hero__title")!!.text()
+        thumbnail_url = selectFirst(".rf-hero__cover img")?.absUrl("src")
+        val info = select(".rf-info-row").associate { it.child(0).text() to it.child(1).text() }
+        author = info["Autor"]
+        artist = info["Artista"]
+        genre = select(".rf-hero__tags a").joinToString { it.text() }.ifEmpty { null }
+        status = when (selectFirst("a.rf-hero__estado")?.absUrl("href")?.toHttpUrlOrNull()?.queryParameter("estado")) {
+            "EN_EMISION" -> SManga.ONGOING
+            "FINALIZADO" -> SManga.COMPLETED
+            "PAUSADO" -> SManga.ON_HIATUS
+            "CANCELADO" -> SManga.CANCELLED
             else -> SManga.UNKNOWN
         }
-
-        author = document.selectFirst("a[href*=\"/autor/\"]")?.text()
+        description = MarkdownDescription.Builder()
+            .info(type(), info["Año"])
+            .description(selectFirst(".rf-hero__synopsis .whitespace-pre-wrap"), keepNewlines = true)
+            .field("Scan", select(".rf-hero__scans a").map { it.text() })
+            .altTitles(listOfNotNull(selectFirst(".rf-hero__alt")?.textOrNull()))
+            .build()
     }
 
-    private fun parseChapterList(body: String, document: Document): List<SChapter> {
-        val chapters = parseChaptersFromRsc(body)
-
-        if (chapters.isNotEmpty()) return chapters
-
-        return parseChaptersFromHtml(document)
-    }
-
-    private fun parseChaptersFromRsc(body: String): List<SChapter> {
-        val chapters = mutableListOf<SChapter>()
-
-        val itemsStart = body.indexOf("\\\"items\\\":[")
-        if (itemsStart == -1) return emptyList()
-
-        val arrayStart = body.indexOf('[', itemsStart)
-        var depth = 0
-        var arrayEnd = arrayStart
-        for (i in arrayStart until body.length) {
-            when (body[i]) {
-                '[' -> depth++
-                ']' -> {
-                    depth--
-                    if (depth == 0) {
-                        arrayEnd = i
-                        break
-                    }
-                }
-            }
-        }
-
-        if (arrayEnd <= arrayStart) return emptyList()
-
-        val rawArray = body.substring(arrayStart, arrayEnd + 1)
-
-        val cleanArray = rawArray.replace("\\\"", "\"").replace("\\\\", "\\")
-
-        val chapterRegex = Regex(
-            """\{"id":"[^"]+","nombre":"((?:Cap|Vol)\.?[^"]*)".*?"href":"([^"]+)".*?"fechaLabel":"([^"]+)".*?"numero":(\d+(?:\.\d+)?)""",
-        )
-        val tituloExtraRegex = Regex(""""tituloExtra":"([^"]+)"""")
-
-        for (match in chapterRegex.findAll(cleanArray)) {
-            val nombre = match.groupValues[1]
-            val href = match.groupValues[2]
-            val fechaLabel = match.groupValues[3]
-            val numero = match.groupValues[4].toFloatOrNull() ?: continue
-
-            val tituloExtra = tituloExtraRegex
-                .find(match.value)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
-            val displayName = if (tituloExtra != null) "$nombre · $tituloExtra" else nombre
-
-            chapters.add(
-                SChapter.create().apply {
-                    url = href
-                    name = displayName
-                    chapter_number = numero
-                    date_upload = dateFormat.tryParseDate(fechaLabel)
-                },
-            )
-        }
-
-        return chapters.sortedByDescending { it.chapter_number }
-    }
-
-    private fun parseChaptersFromHtml(document: Document): List<SChapter> {
-        val chapters = document.select("article.obra-chapter-row")
-
-        return chapters.mapNotNull { row ->
-            val link = row.selectFirst("a[href*=\"/capitulo/\"]") ?: return@mapNotNull null
-            SChapter.create().apply {
-                url = link.attr("href")
-                name = link.text()
-
-                val numberText = row.selectFirst(".obra-chapter-number")?.text()
-                chapter_number = numberText?.toFloatOrNull() ?: -1f
-
-                val spans = row.select("span")
-                for (span in spans) {
-                    val text = span.text()
-                    if (text.matches("\\d{1,2}\\s+\\w{3}\\s+\\d{4}".toRegex())) {
-                        date_upload = dateFormat.tryParseDate(text)
-                        break
-                    }
-                }
-            }
-        }.sortedByDescending { it.chapter_number }
-    }
+    // "Manga · Proyecto fansub"
+    private fun Document.type() = selectFirst(".rf-hero__tipo")?.text()?.substringBefore(" · ")
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val url = baseUrl + chapter.url
-        val body = client.get(url).use { it.body.string() }
+        val url = getChapterUrl(chapter)
+        val body = client.get(url, Fetch.DOCUMENT).use { it.body.string() }
 
         val archivoMatch = Regex(""""archivoUrl\\?":\\?"([^"]+)"""").find(body)
             ?: Regex("""archivoUrl[^"]*"[^"]*"([^"]+/archivo)""").find(body)
@@ -207,11 +157,16 @@ abstract class Ritto : KeiSource() {
             return handlePdfChapter(body)
         }
 
+        val document = org.jsoup.Jsoup.parse(body, url)
+        val images = document.select("img.reader-image")
+        if (images.isNotEmpty()) {
+            return images.mapIndexed { i, img -> Page(i, imageUrl = img.absUrl("src")) }
+        }
+
         val rscPages = parsePagesFromRsc(body)
         if (rscPages.isNotEmpty()) return rscPages
 
-        val document = org.jsoup.Jsoup.parse(body, url)
-        return parsePagesFromHtml(document)
+        return emptyList()
     }
 
     private suspend fun handlePdfChapter(body: String): List<Page> {
@@ -227,7 +182,7 @@ abstract class Ritto : KeiSource() {
         val pdfFile = File(cacheDir, "chapter_$fileHash.pdf")
 
         if (!pdfFile.exists()) {
-            client.get(fullUrl, ensureSuccess = false).use { pdfResponse ->
+            client.get(fullUrl, Fetch.XHR, ensureSuccess = false).use { pdfResponse ->
                 if (!pdfResponse.isSuccessful) throw Exception("Error al descargar PDF: ${pdfResponse.code}")
                 pdfFile.writeBytes(pdfResponse.body.bytes())
             }
@@ -279,10 +234,6 @@ abstract class Ritto : KeiSource() {
         }.toList()
     }
 
-    private fun parsePagesFromHtml(document: Document): List<Page> = document.select("img.reader-image").mapIndexed { index, img ->
-        Page(index, imageUrl = img.attr("abs:src"))
-    }
-
     private fun pdfPageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url
@@ -329,47 +280,11 @@ abstract class Ritto : KeiSource() {
         return chain.proceed(request)
     }
 
-    private val dateFormat = DateTimeFormatter.ofPattern("d MMM yyyy", Locale("es"))
+    override fun getFilterList(data: JsonElement?) = getFilters()
 
     companion object {
+        // Text novels, listed with the comics on the site
+        private const val NOVEL = "Novela"
         private const val CDN_BASE_URL = "https://cdn.solitarionf.one"
-    }
-
-    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
-        TypeFilter(),
-        StatusFilter(),
-        GenreFilter(),
-        CategoryFilter(),
-        SortFilter(),
-    )
-
-    private fun catalogParse(document: Document): MangasPage {
-        val mangaCards = document.select("a[href*=\"/obra/\"]")
-
-        val mangas = mangaCards.mapNotNull { card ->
-            val href = card.attr("href")
-            if (!href.startsWith("/obra/")) return@mapNotNull null
-
-            val img = card.selectFirst("img[src*=\"cdn.solitarionf.one\"]") ?: return@mapNotNull null
-            val h3 = card.selectFirst("h3") ?: return@mapNotNull null
-
-            SManga.create().apply {
-                url = href.removePrefix("/obra/")
-                title = h3.text()
-                thumbnail_url = img.attr("abs:src")
-            }
-        }
-
-        val pageButtons = document.select("button.h-8.w-8")
-        val activeIdx = pageButtons.indexOfFirst {
-            it.className().contains("bg-[#D93025]")
-        }
-        val hasNextPage = if (pageButtons.isNotEmpty() && activeIdx >= 0) {
-            activeIdx < pageButtons.size - 1
-        } else {
-            mangas.size >= 20
-        }
-
-        return MangasPage(mangas, hasNextPage)
     }
 }

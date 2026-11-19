@@ -6,12 +6,19 @@ plugins {
 
 keiyoushi {
     name = "Ritto"
-    versionCode = 2
-    contentWarning = ContentWarning.SAFE
+    versionCode = 3
+    contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
     source {
         lang = "es"
         baseUrl = "https://ritto.cc"
+    }
+
+    deeplink {
+        path("/obra/..*")
+        path("/scan/..*")
+        path("/autor/..*")
+        path("/catalogo")
     }
 }
