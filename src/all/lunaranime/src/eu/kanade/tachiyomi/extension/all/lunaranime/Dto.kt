@@ -292,6 +292,11 @@ class LunarPageListResponse(
 )
 
 @Serializable
+class LunarLockedChapterDto(
+    @SerialName("is_points_locked") val isPointsLocked: Boolean = false,
+)
+
+@Serializable
 class LunarSessionDto(
     @SerialName("session_data") val sessionData: String,
 )
@@ -304,6 +309,9 @@ class LunarPageListData(
 @Serializable
 class LunarPageListDecrypted(
     val data: LunarPageListData,
+    val slug: String? = null,
+    val v4: String? = null,
+    val veil: List<String?>? = null,
     @SerialName("cache_status") val cacheStatus: String? = null,
     @SerialName("cache_ttl") val cacheTtl: Long? = null,
 )
@@ -372,3 +380,26 @@ class LunarSimilarDto(
         thumbnail_url = coverUrl
     }
 }
+
+@Serializable
+class SerenityJwk(
+    val crv: String,
+    val kty: String,
+    val x: String,
+    val y: String,
+)
+
+@Serializable
+class SerenityProofHeader(
+    val alg: String,
+    val typ: String,
+    val jwk: SerenityJwk,
+)
+
+@Serializable
+class SerenityProofPayload(
+    val htu: String,
+    val htm: String,
+    val iat: Long,
+    val jti: String,
+)

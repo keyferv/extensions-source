@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Lunar Manga"
-    versionCode = 7
+    versionCode = 9
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
