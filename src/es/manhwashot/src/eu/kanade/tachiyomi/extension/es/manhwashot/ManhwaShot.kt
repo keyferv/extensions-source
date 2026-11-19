@@ -19,10 +19,35 @@ import keiyoushi.utils.toJsonElement
 import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Document
 
 @Source
 abstract class ManhwaShot : KeiSource() {
+
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        addInterceptor(::contentLengthInterceptor)
+    }
+
+    private fun contentLengthInterceptor(chain: Interceptor.Chain): Response {
+        val response = chain.proceed(chain.request())
+        val body = response.body
+        val contentType = body.contentType()?.toString() ?: ""
+
+        // Si es una imagen o si el contentLength es desconocido (-1), bufferizamos el cuerpo
+        // para proporcionar un Content-Length explícito y evitar el bug de byteCount < 0: -1 en KumoYomi.
+        if (body.contentLength() < 0 || contentType.startsWith("image/")) {
+            val bytes = body.bytes()
+            val newBody = bytes.toResponseBody(body.contentType())
+            return response.newBuilder()
+                .body(newBody)
+                .build()
+        }
+        return response
+    }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val document = client.get("$baseUrl/ranking/", Fetch.DOCUMENT).asJsoup()
@@ -140,7 +165,7 @@ abstract class ManhwaShot : KeiSource() {
             .distinct()
 
         if (images.isNotEmpty()) {
-            return images.mapIndexed { index, url -> Page(index, imageUrl = url) }
+            return images.mapIndexed { index, url -> Page(index, url = url, imageUrl = url) }
         }
 
         val reader = runCatching {

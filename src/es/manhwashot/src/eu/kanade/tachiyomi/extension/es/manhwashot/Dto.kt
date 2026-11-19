@@ -24,5 +24,5 @@ class ReaderDto(
     private val images: List<String> = emptyList(),
     val locked: Boolean = false,
 ) {
-    fun toPages() = images.mapIndexed { index, url -> Page(index, imageUrl = url) }
+    fun toPages() = images.mapIndexed { index, url -> Page(index, url = url, imageUrl = url) }
 }
