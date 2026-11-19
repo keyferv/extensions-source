@@ -23,7 +23,14 @@ class ChapterDto(
         val title = this@ChapterDto.tituloStr ?: parent?.tituloStr
         this.url = this@ChapterDto.url
         this.name = when {
-            num != null && title != null -> "Capítulo $num: $title"
+            num != null && title != null -> {
+                val tLower = title.lowercase()
+                if (tLower.contains("cap") || tLower.contains("ch.")) {
+                    title
+                } else {
+                    "Capítulo $num: $title"
+                }
+            }
             num != null -> "Capítulo $num"
             title != null -> title
             else -> "Capítulo sin número"
@@ -52,9 +59,9 @@ class PageDto(
 ) {
     fun toPage(index: Int, chapterUrl: String = ""): Page {
         val resolvedUrl = when {
-            src.contains("mangadex") && !fallback.isNullOrBlank() -> fallback
+            src.isNotBlank() -> src
             !fallback.isNullOrBlank() -> fallback
-            else -> src
+            else -> ""
         }
         val fullUrl = if (resolvedUrl.startsWith("http")) resolvedUrl else "https://onfmangas.com$resolvedUrl"
         return Page(index, url = chapterUrl, imageUrl = fullUrl)

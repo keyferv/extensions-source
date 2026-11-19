@@ -59,17 +59,30 @@ abstract class OnfMangas : KeiSource() {
         val request = normalizeBrowserHeaders(chain.request())
         val response = chain.proceed(request)
 
-        if (response.code == 403) {
-            val body = response.peekBody(65536).string()
+        val body = response.peekBody(65536).string()
 
-            // onfmangas "Verificando" custom challenge — solve with QuickJs
-            if (body.contains("Verificando")) {
-                response.close()
-                val cookieString = solveOnfCheck(body)
-                    ?: error("Failed to solve cookie challenge")
-                val cookie = Cookie.parse(request.url, cookieString)
-                client.cookieJar.saveFromResponse(request.url, listOfNotNull(cookie))
-                return chain.proceed(request)
+        // onfmangas "Verificando" custom challenge — solve with QuickJs
+        if (body.contains("Verificando")) {
+            response.close()
+            val cookieString = solveOnfCheck(body)
+                ?: error("Failed to solve cookie challenge")
+            val cookie = Cookie.parse(request.url, cookieString)
+            client.cookieJar.saveFromResponse(request.url, listOfNotNull(cookie))
+            return chain.proceed(request)
+        }
+
+        // Cloudflare Turnstile / Managed Challenge (can be 403 or 200 challenge page)
+        val isCf = response.code == 403 ||
+            body.contains("_cf_chl_opt") ||
+            body.contains("cf-turnstile") ||
+            body.contains("__cf_chl_tk") ||
+            body.contains("Just a moment...") ||
+            body.contains("Un momento…")
+
+        if (isCf) {
+            // If it's an API error response (e.g. {"error": ...}), don't send to WebView
+            if (body.startsWith("{") && body.contains("error")) {
+                return response
             }
 
             // Cloudflare Turnstile — only attempt once per request chain
@@ -79,11 +92,6 @@ abstract class OnfMangas : KeiSource() {
                     "Cloudflare bloqueó la solicitud. Abrí onfmangas.com en tu navegador, " +
                         "resolvé el captcha, y volvé a intentar.",
                 )
-            }
-
-            // If it's an API error response (e.g. {"error": ...}), don't send to WebView
-            if (body.startsWith("{") && body.contains("error")) {
-                return response
             }
 
             val loadUrl = when {
@@ -111,16 +119,7 @@ abstract class OnfMangas : KeiSource() {
             )
         }
 
-        val body = response.peekBody(8192).string()
-        if (!body.contains("Verificando")) return response
-
-        response.close()
-        val cookieString = solveOnfCheck(body)
-            ?: error("Failed to solve cookie challenge")
-        val cookie = Cookie.parse(request.url, cookieString)
-        client.cookieJar.saveFromResponse(request.url, listOfNotNull(cookie))
-
-        return chain.proceed(request)
+        return response
     }
 
     private fun syncCookiesFromWebView(url: String) {
@@ -129,6 +128,7 @@ abstract class OnfMangas : KeiSource() {
             Cookie.parse(url.toHttpUrl(), it.trim())
         }
         client.cookieJar.saveFromResponse(url.toHttpUrl(), cookies)
+        client.cookieJar.saveFromResponse(baseUrl.toHttpUrl(), cookies)
     }
 
     private fun normalizeBrowserHeaders(request: Request): Request {
@@ -335,13 +335,21 @@ abstract class OnfMangas : KeiSource() {
     // ============================== Chapters ==============================
 
     private fun parseChapterList(document: Document): List<SChapter> {
-        val hexString = document.selectFirst("script:containsData(const _hex =)")
-            ?.data()
-            ?.substringAfter("const _hex = \"")
-            ?.substringBefore("\";")
+        val script = document.selectFirst("script:containsData(chaptersData)")
+            ?: document.selectFirst("script:containsData(_hex)")
             ?: return emptyList()
 
-        val jsonString = decodeHex(hexString)
+        val scriptData = script.data()
+        val jsonString = if (scriptData.contains("chaptersData")) {
+            val after = scriptData.substringAfter("chaptersData =").trimStart()
+            val endIdx = after.lastIndexOf(']')
+            if (endIdx != -1) after.substring(0, endIdx + 1) else return emptyList()
+        } else {
+            val hexString = scriptData.substringAfter("const _hex = \"")
+                .substringBefore("\";")
+            decodeHex(hexString)
+        }
+
         val chaptersData = jsonString.parseAs<List<ChapterDto>>()
 
         val chapters = mutableListOf<SChapter>()
@@ -371,15 +379,18 @@ abstract class OnfMangas : KeiSource() {
 
     // =============================== Pages ================================
 
+    private val readerTokenRegex = """onfReaderPagesPromise\s*=.*?\}\)\s*\(\s*["']([^"']+)["']""".toRegex(RegexOption.DOT_MATCHES_ALL)
+
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = baseUrl + chapter.url
         val document = client.get(chapterUrl, Fetch.DOCUMENT).asJsoup()
 
-        // 1. New reader engine: viewerContainer with data-reader-access token
+        // 1. Reader engine: data-reader-access or inline onfReaderPagesPromise ticket
         val access = document.selectFirst("#viewerContainer")?.attr("data-reader-access")
             ?.takeIf { it.isNotEmpty() }
             ?: document.selectFirst("[data-reader-access]")?.attr("data-reader-access")
                 ?.takeIf { it.isNotEmpty() }
+            ?: extractReaderToken(document)
 
         if (!access.isNullOrBlank()) {
             val jsonBody = buildJsonObject {
@@ -416,6 +427,13 @@ abstract class OnfMangas : KeiSource() {
         }
 
         return emptyList()
+    }
+
+    private fun extractReaderToken(document: Document): String? {
+        val script = document.selectFirst("script:containsData(onfReaderPagesPromise)")?.data()
+            ?: return null
+        return readerTokenRegex.find(script)?.groupValues?.getOrNull(1)
+            ?: script.substringAfter("})(\"").substringBefore("\")").takeIf { it.isNotEmpty() }
     }
 
     override fun getImageRequest(page: Page): Request {
